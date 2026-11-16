@@ -200,7 +200,7 @@ Small teams do not all live on AWS. Both paths share the same zero-trust ingress
 Prerequisites: Docker 24+, Compose v2, a Cloudflare account (for the real tunnel), a Tailscale tailnet (for operator access).
 
 ```bash
-git clone https://github.com/<you>/cloud-native-network-engineer.git
+git clone https://github.com/Kikyo987/cloud-native-network-engineer.git
 cd cloud-native-network-engineer
 
 # 1. Local stack: app + Prometheus + Grafana + Loki (no public publish)
