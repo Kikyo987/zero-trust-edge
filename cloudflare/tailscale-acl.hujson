@@ -1,0 +1,125 @@
+// Tailscale ACL (HuJSON). Paste into Admin console → Access Controls,
+// or apply with the Tailscale GitOps integration.
+//
+// Identity is the operator perimeter. The AWS security group has no
+// public TCP inbound; if this file is wrong, the node is either
+// unreachable or too reachable.
+//
+// Tags
+//   tag:node  k3s / compose hosts (sshd, kube-apiserver)
+//   tag:app   application identity that may reach the database
+//   tag:db    Postgres / MySQL (or a subnet-router tagging RDS)
+//   tag:ci    GitHub Actions runners (ephemeral)
+//
+// SSH: group:ops and tag:ci only. Developers in group:dev get the app
+// over Cloudflare Access, not a shell.
+//
+// Database: tag:app → tag:db:5432 only. Laptops do not get 5432.
+
+{
+  "tagOwners": {
+    "tag:node": ["autogroup:admin"],
+    "tag:app":  ["autogroup:admin"],
+    "tag:db":   ["autogroup:admin"],
+    "tag:ci":   ["autogroup:admin"],
+  },
+
+  "autoApprovers": {
+    // A node may advertise the tag it was minted with.
+    // Humans still approve subnet routes by hand.
+    "tags": {
+      "tag:node": ["tag:node"],
+      "tag:app":  ["tag:app"],
+      "tag:db":   ["tag:db"],
+      "tag:ci":   ["tag:ci"],
+    },
+  },
+
+  "groups": {
+    "group:ops": [
+      "github_user:REPLACE_OPS_LEAD",
+      "github_user:REPLACE_SRE",
+    ],
+    "group:dev": [
+      "github_user:REPLACE_DEVELOPER",
+    ],
+  },
+
+  "grants": [
+    // Operators: shells and cluster API on the node. Not the database.
+    {
+      "src": ["group:ops"],
+      "dst": ["tag:node"],
+      "ip":  ["22", "6443", "3000", "9090", "3100"],
+    },
+
+    // CI: SSH only, so it can kubectl apply. No Grafana, no DB.
+    {
+      "src": ["tag:ci"],
+      "dst": ["tag:node"],
+      "ip":  ["22"],
+    },
+
+    // Application → database. This is the only path to 5432/3306.
+    {
+      "src": ["tag:app"],
+      "dst": ["tag:db"],
+      "ip":  ["5432", "3306"],
+    },
+
+    // Nodes may talk to each other (future HA k3s).
+    {
+      "src": ["tag:node"],
+      "dst": ["tag:node"],
+      "ip":  ["6443", "10250", "8472", "51820"],
+    },
+
+    // App pods scheduled on tag:node need to reach tag:db as well when
+    // the node itself is the subnet router. Keep this if k3s SNAT's
+    // egress as the node Tailscale IP; drop it if the app has its own
+    // tailscale sidecar tagged tag:app.
+    {
+      "src": ["tag:node"],
+      "dst": ["tag:db"],
+      "ip":  ["5432", "3306"],
+    },
+
+    // Humans reach their own devices. They do not reach tag:db.
+    {
+      "src": ["autogroup:member"],
+      "dst": ["autogroup:self"],
+      "ip":  ["*"],
+    },
+  ],
+
+  // Tailscale SSH. "accept" is identity + ACL. "check" would prompt
+  // a second owner — use that for root if the team grows.
+  "ssh": [
+    {
+      "action": "accept",
+      "src":    ["group:ops"],
+      "dst":    ["tag:node"],
+      "users":  ["ubuntu", "autogroup:nonroot"],
+    },
+    {
+      "action": "accept",
+      "src":    ["tag:ci"],
+      "dst":    ["tag:node"],
+      "users":  ["ubuntu"],
+    },
+    // Root from ops is a conscious grant, not the default.
+    {
+      "action": "check",
+      "src":    ["group:ops"],
+      "dst":    ["tag:node"],
+      "users":  ["root"],
+    },
+  ],
+
+  "disableIPv4":    false,
+  "oneCGNATRoute":  false, // keep 100.x /32s so grants stay precise
+
+  // Do NOT advertise 10.42.0.0/16 as a subnet route. That turns every
+  // laptop in the tailnet into a path into RFC1918. If you must reach
+  // an RDS instance, tag a subnet router tag:db and grant 5432 only.
+}

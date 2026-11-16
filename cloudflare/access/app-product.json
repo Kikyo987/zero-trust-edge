@@ -1,0 +1,23 @@
+{
+  "name": "app.example.com",
+  "domain": "app.example.com",
+  "type": "self_hosted",
+  "session_duration": "8h",
+  "auto_redirect_to_identity": true,
+  "http_only_cookie_attribute": true,
+  "enable_binding_cookie": true,
+  "options": {
+    "path_cookie_attribute": true
+  },
+  "allowed_idps": [
+    "REPLACE_GITHUB_IDP_UUID",
+    "REPLACE_GOOGLE_IDP_UUID"
+  ],
+  "app_launcher_visible": true,
+  "destinations": [
+    {
+      "type": "public",
+      "uri": "app.example.com"
+    }
+  ]
+}

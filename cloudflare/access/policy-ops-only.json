@@ -1,0 +1,24 @@
+{
+  "name": "Allow ops emails + MFA",
+  "decision": "allow",
+  "include": [
+    {
+      "email": {
+        "email": "ops-lead@customer.com"
+      }
+    },
+    {
+      "email": {
+        "email": "sre@customer.com"
+      }
+    }
+  ],
+  "require": [
+    {
+      "auth_method": "hwk|swk|mfa"
+    }
+  ],
+  "exclude": [],
+  "purpose_justification_required": true,
+  "purpose_justification_prompt": "Why are you opening Grafana?"
+}

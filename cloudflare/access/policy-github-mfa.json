@@ -1,0 +1,20 @@
+{
+  "name": "Allow GitHub org + MFA",
+  "decision": "allow",
+  "include": [
+    {
+      "github-organization": {
+        "name": "REPLACE_GITHUB_ORG",
+        "identity_provider_id": "REPLACE_GITHUB_IDP_UUID"
+      }
+    }
+  ],
+  "require": [
+    {
+      "auth_method": "hwk|swk|mfa"
+    }
+  ],
+  "exclude": [],
+  "purpose_justification_required": false,
+  "approval_required": false
+}

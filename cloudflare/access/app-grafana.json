@@ -1,0 +1,19 @@
+{
+  "name": "grafana.example.com",
+  "domain": "grafana.example.com",
+  "type": "self_hosted",
+  "session_duration": "12h",
+  "auto_redirect_to_identity": true,
+  "http_only_cookie_attribute": true,
+  "enable_binding_cookie": true,
+  "allowed_idps": [
+    "REPLACE_GITHUB_IDP_UUID"
+  ],
+  "app_launcher_visible": true,
+  "destinations": [
+    {
+      "type": "public",
+      "uri": "grafana.example.com"
+    }
+  ]
+}

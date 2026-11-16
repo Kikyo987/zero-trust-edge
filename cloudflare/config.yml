@@ -1,30 +1,46 @@
-# cloudflared config for the compose / systemd path.
-# k3s uses the ConfigMap in k3s/manifests/40-cloudflared.yaml (same idea).
+# Named Cloudflare Tunnel — origin with ZERO public inbound ports.
 #
-# protocol: auto  — QUIC then HTTP/2. Pin http2 after an MTU incident.
-# Catch-all 404 is mandatory so an unknown hostname does not fall through.
+# cloudflared is a client. It dials Cloudflare on outbound TCP/443
+# (QUIC on UDP/443). The host firewall / AWS SG must not open 80, 443,
+# 7844, or 22. Older blog posts that "open 7844/udp for the tunnel"
+# describe a different topology. Do not copy them.
+#
+# Token auth is preferred on servers (TUNNEL_TOKEN / --token-file).
+# credentials-file is the laptop/bootstrap path only.
 
 tunnel: edge-zero
-credentials-file: /etc/cloudflared/credentials.json   # unused when TUNNEL_TOKEN is set
-protocol: auto
-metrics: 127.0.0.1:2000
-no-autoupdate: true
+credentials-file: /etc/cloudflared/credentials.json
+protocol: auto          # QUIC, then HTTP/2. Pin http2 after an MTU incident.
+metrics: 127.0.0.1:2000 # never bind 0.0.0.0
+no-autoupdate: true     # pin the package; roll with the image / apt
 grace-period: 30s
 retries: 5
+loglevel: info
+
+# Do not enable warp-routing / private-network CIDRs unless you have
+# measured MTU. Advertising 10.42.0.0/16 through WARP is a second VPN.
+warp-routing:
+  enabled: false
 
 ingress:
+  # Product — Cloudflare Access sits in front of this hostname.
+  # Origin is ClusterIP / compose DNS, never a public IP.
   - hostname: app.example.com
-    service: http://edge-echo:8080
+    service: http://edge-echo.edge.svc.cluster.local:8080
     originRequest:
       connectTimeout: 10s
       keepAliveTimeout: 90s
       httpHostHeader: app.example.com
       noTLSVerify: false
+      disableChunkedEncoding: false
 
+  # Grafana — tighter Access policy (ops + MFA only).
   - hostname: grafana.example.com
-    service: http://grafana:3000
+    service: http://grafana.monitoring.svc.cluster.local:3000
     originRequest:
       connectTimeout: 10s
       httpHostHeader: grafana.example.com
 
+  # Catch-all. Without this, an unknown hostname on the same tunnel
+  # falls through to the first rule. First-match order.
   - service: http_status:404

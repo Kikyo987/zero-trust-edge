@@ -1,53 +1,60 @@
-// Tailscale ACL (HuJSON). Paste into the admin console → Access Controls,
-// or apply via the Tailscale GitOps integration.
-//
-// Identity is the perimeter for operators. The AWS SG is empty; if this
-// file is wrong, the node is either unreachable or too reachable.
-//
-// Tags:
-//   tag:node  — k3s / compose hosts
-//   tag:ci    — GitHub Actions runners (ephemeral)
-//   tag:ops   — humans (applied via group, not a tag on laptops unless you want it)
+// Canonical copy lives next to the runbook:
+//   ../cloudflare/tailscale-acl.hujson
+// Keep these two files identical.
 
 {
   "tagOwners": {
     "tag:node": ["autogroup:admin"],
+    "tag:app":  ["autogroup:admin"],
+    "tag:db":   ["autogroup:admin"],
     "tag:ci":   ["autogroup:admin"],
-    "tag:ops":  ["autogroup:admin"],
   },
 
   "autoApprovers": {
-    // Nodes may advertise the tag they were minted with. Humans still
-    // approve subnet routes by hand — we do not auto-accept 10.42.0.0/16.
     "tags": {
       "tag:node": ["tag:node"],
+      "tag:app":  ["tag:app"],
+      "tag:db":   ["tag:db"],
       "tag:ci":   ["tag:ci"],
     },
   },
 
+  "groups": {
+    "group:ops": [
+      "github_user:REPLACE_OPS_LEAD",
+      "github_user:REPLACE_SRE",
+    ],
+    "group:dev": [
+      "github_user:REPLACE_DEVELOPER",
+    ],
+  },
+
   "grants": [
-    // Operators: SSH, kube-apiserver, Grafana, Prometheus, Loki.
-    // Bound on the node to tailscale0 / 127.0.0.1, but ACL is still the
-    // identity layer.
     {
       "src": ["group:ops"],
       "dst": ["tag:node"],
-      "ip":  ["22", "6443", "3000", "9090", "3100", "8080"],
+      "ip":  ["22", "6443", "3000", "9090", "3100"],
     },
-    // CI: SSH only, so it can apply manifests. No Grafana, no kube
-    // except via the SSH hop as the node user.
     {
       "src": ["tag:ci"],
       "dst": ["tag:node"],
       "ip":  ["22"],
     },
-    // Nodes may talk to each other (future HA).
+    {
+      "src": ["tag:app"],
+      "dst": ["tag:db"],
+      "ip":  ["5432", "3306"],
+    },
     {
       "src": ["tag:node"],
       "dst": ["tag:node"],
-      "ip":  ["*"],
+      "ip":  ["6443", "10250", "8472", "51820"],
     },
-    // Humans can reach their own devices.
+    {
+      "src": ["tag:node"],
+      "dst": ["tag:db"],
+      "ip":  ["5432", "3306"],
+    },
     {
       "src": ["autogroup:member"],
       "dst": ["autogroup:self"],
@@ -55,19 +62,12 @@
     },
   ],
 
-  "groups": {
-    "group:ops": [
-      // Replace with GitHub / Google identities on the tailnet.
-      "github_user:REPLACE_ME",
-    ],
-  },
-
   "ssh": [
     {
       "action": "accept",
       "src":    ["group:ops"],
       "dst":    ["tag:node"],
-      "users":  ["ubuntu", "root", "autogroup:nonroot"],
+      "users":  ["ubuntu", "autogroup:nonroot"],
     },
     {
       "action": "accept",
@@ -75,18 +75,14 @@
       "dst":    ["tag:node"],
       "users":  ["ubuntu"],
     },
-  ],
-
-  // Do not advertise 10.42.0.0/16 as a subnet route unless operators
-  // truly need to reach RFC1918 next-hops (RDS, etc.). Advertising it
-  // makes every laptop a potential path into the VPC.
-  "nodeAttrs": [
     {
-      "target": ["tag:node"],
-      "attr":   ["funnel"], // Funnel stays OFF unless you remove this? attr enable. We omit funnel.
+      "action": "check",
+      "src":    ["group:ops"],
+      "dst":    ["tag:node"],
+      "users":  ["root"],
     },
   ],
 
-  "disableIPv4": false,
-  "oneCGNATRoute": false, // keep 100.x /32s so ACLs stay precise
+  "disableIPv4":   false,
+  "oneCGNATRoute": false,
 }

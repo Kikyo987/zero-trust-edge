@@ -1,0 +1,23 @@
+{
+  "name": "Allow Google Workspace domain + MFA",
+  "decision": "allow",
+  "include": [
+    {
+      "email_domain": {
+        "domain": "customer.com"
+      }
+    }
+  ],
+  "require": [
+    {
+      "login_method": {
+        "id": "REPLACE_GOOGLE_IDP_UUID"
+      }
+    },
+    {
+      "auth_method": "hwk|swk|mfa"
+    }
+  ],
+  "exclude": [],
+  "purpose_justification_required": false
+}

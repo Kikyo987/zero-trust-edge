@@ -1,0 +1,24 @@
+# Same tunnel, compose network DNS names (docker compose --profile tunnel).
+# Copy over config.yml on a VPS that is not running k3s.
+
+tunnel: edge-zero
+protocol: auto
+metrics: 127.0.0.1:2000
+no-autoupdate: true
+grace-period: 30s
+
+ingress:
+  - hostname: app.example.com
+    service: http://edge-echo:8080
+    originRequest:
+      connectTimeout: 10s
+      keepAliveTimeout: 90s
+      httpHostHeader: app.example.com
+
+  - hostname: grafana.example.com
+    service: http://grafana:3000
+    originRequest:
+      connectTimeout: 10s
+      httpHostHeader: grafana.example.com
+
+  - service: http_status:404
