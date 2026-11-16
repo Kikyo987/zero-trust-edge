@@ -1,0 +1,47 @@
+# Prometheus for the compose path. k3s uses the same scrape annotations
+# (prometheus.io/scrape) so a kube-prometheus-stack install picks them up.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: edge-zero
+    env: dev
+
+alerting:
+  alertmanagers: []
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: edge-echo
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["edge-echo:8080"]
+    # Also POST 8 KiB at the synthetic interval — see blackbox-style probe below.
+
+  - job_name: edge-echo-large-post
+    metrics_path: /readyz
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ["edge-echo:8080"]
+    # Prometheus cannot POST a body natively. The companion probe is
+    # scripts/mtu-path-check.sh + the blackbox module. This GET still
+    # keeps /readyz on the scrape set.
+
+  - job_name: cloudflared
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["cloudflared:2000"]
+    # Present only when the tunnel profile is up; scrape failures are
+    # tolerated via the alert 'CloudflaredDown' which is info unless
+    # the profile is enabled.
+
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]

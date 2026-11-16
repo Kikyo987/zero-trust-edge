@@ -1,0 +1,104 @@
+# edge-echo: the sample workload. Non-root, read-only rootfs, dropped
+# caps, resource limits, probes on /healthz and /readyz. Image is
+# replaced by CI with a digest pin.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: edge-echo
+  namespace: edge
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge-echo
+  namespace: edge
+  labels:
+    app: edge-echo
+spec:
+  selector:
+    app: edge-echo
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+  type: ClusterIP # never NodePort, never LoadBalancer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-echo
+  namespace: edge
+  labels:
+    app: edge-echo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: edge-echo
+  template:
+    metadata:
+      labels:
+        app: edge-echo
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: edge-echo
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: edge-echo
+          image: ghcr.io/example/edge-echo:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: LISTEN_ADDR
+              value: ":8080"
+            - name: GIN_MODE
+              value: release
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 8Mi
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: edge-echo

@@ -1,0 +1,30 @@
+# cloudflared config for the compose / systemd path.
+# k3s uses the ConfigMap in k3s/manifests/40-cloudflared.yaml (same idea).
+#
+# protocol: auto  — QUIC then HTTP/2. Pin http2 after an MTU incident.
+# Catch-all 404 is mandatory so an unknown hostname does not fall through.
+
+tunnel: edge-zero
+credentials-file: /etc/cloudflared/credentials.json   # unused when TUNNEL_TOKEN is set
+protocol: auto
+metrics: 127.0.0.1:2000
+no-autoupdate: true
+grace-period: 30s
+retries: 5
+
+ingress:
+  - hostname: app.example.com
+    service: http://edge-echo:8080
+    originRequest:
+      connectTimeout: 10s
+      keepAliveTimeout: 90s
+      httpHostHeader: app.example.com
+      noTLSVerify: false
+
+  - hostname: grafana.example.com
+    service: http://grafana:3000
+    originRequest:
+      connectTimeout: 10s
+      httpHostHeader: grafana.example.com
+
+  - service: http_status:404

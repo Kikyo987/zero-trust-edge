@@ -1,0 +1,115 @@
+# Build, lint, scan. No deploy, no secrets required besides GHCR push
+# on the default branch.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/edge-echo
+  GO_VERSION: "1.22"
+
+jobs:
+  terraform:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+      - name: fmt
+        run: terraform fmt -check -recursive terraform
+      - name: init (no backend) + validate
+        working-directory: terraform/environments/dev
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+  go:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: docker/app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: docker/app/go.sum
+      - run: go vet ./...
+      - run: go test ./...
+
+  image:
+    runs-on: ubuntu-24.04
+    needs: [go]
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=dev,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/app
+          target: runtime
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          format: table
+        # On PRs the image is not pushed; scan the local build instead.
+        if: github.event_name != 'pull_request'
+      - name: trivy (local)
+        if: github.event_name == 'pull_request'
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: docker/app
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+  yaml:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: kubeconform
+        uses: docker://ghcr.io/yannh/kubeconform:v0.6.7
+        with:
+          args: -strict -ignore-missing-schemas -summary k3s/manifests

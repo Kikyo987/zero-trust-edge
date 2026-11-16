@@ -1,0 +1,62 @@
+# Traefik Ingress. The Service is ClusterIP; Traefik is the in-cluster
+# hop. cloudflared talks to the Service DNS directly (see 40-cloudflared)
+# so this Ingress is what you use if you point the tunnel at Traefik
+# instead of the Service. Both are valid; Service-direct is fewer hops.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: edge-echo
+  namespace: edge
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+    # TLS is terminated at Cloudflare. Inside the cluster we speak HTTP
+    # on the pod network. Do not mint a public cert on origin.
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: app.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: edge-echo
+                port:
+                  number: 8080
+---
+# HelmChartConfig is k3s-native. Bind Traefik to the pod network, not to
+# host :80/:443 on 0.0.0.0. cloudflared reaches it via ClusterIP.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    ports:
+      web:
+        expose:
+          default: false
+        exposedPort: 80
+      websecure:
+        expose:
+          default: false
+        exposedPort: 443
+    service:
+      enabled: true
+      type: ClusterIP
+    hostNetwork: false
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 300m
+        memory: 128Mi
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 65532
+    additionalArguments:
+      - "--global.checknewversion=false"
+      - "--global.sendanonymoususage=false"

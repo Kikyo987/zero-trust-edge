@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+
+project          = "edge-zero"
+region           = "us-east-1"
+vpc_cidr         = "10.42.0.0/16"
+
+# Cheap default: public IP, empty SG, no NAT Gateway.
+enable_nat_gateway   = false
+assign_public_ip     = true
+egress_unrestricted  = false
+
+instance_type    = "t4g.small"
+architecture     = "arm64"
+root_volume_gb   = 20
+
+# Globally unique. Include account id.
+flow_logs_bucket = "edge-zero-dev-flow-logs-123456789012"

@@ -1,0 +1,61 @@
+# Local secrets and env
+.env
+.env.*
+!.env.example
+!.env*.example
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+*.p12
+*.kdbx
+secrets/
+**/secrets.env
+cloudflared-credentials.json
+cert.pem
+credentials.json
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+terraform.tfvars
+!terraform.tfvars.example
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Build artefacts
+bin/
+dist/
+*.exe
+coverage.out
+*.test
+
+# Node / Python leftovers if someone runs local tools
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+
+# k3s / kube
+kubeconfig
+k3s.yaml
+*.kubeconfig
+
+# Monitoring local data
+monitoring/data/
+docker/compose/data/

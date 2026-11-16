@@ -1,0 +1,59 @@
+groups:
+  - name: edge-zero
+    rules:
+      - alert: InstanceDown
+        expr: up{job="edge-echo"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "edge-echo is not scraping"
+          description: "The origin behind the tunnel is gone. Users will 1033/502."
+
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(edge_echo_requests_total{code=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(edge_echo_requests_total[5m])), 0.001)
+          > 0.05
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "5xx rate > 5% over 10m"
+
+      - alert: PMTUDBroken
+        expr: probe_icmp_df_ok{size="1472"} == 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Path MTU discovery failed at 1472 bytes"
+          description: |
+            Jumbo frames or dropped ICMP dest-unreach. GET will work, POST
+            will hang. See docs/postmortem-example.md.
+
+      - alert: CloudflareOriginTimeouts
+        expr: increase(cloudflared_tunnel_request_errors_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "cloudflared is seeing origin errors"
+          description: "Usually MTU, a dead Service, or NetworkPolicy drop."
+
+      - alert: DiskFilling
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.15
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "root filesystem < 15% free (Loki chunks?)"
+
+      - alert: NatGatewayPresent
+        expr: aws_nat_gateway_count > 0
+        for: 1h
+        labels:
+          severity: ticket
+        annotations:
+          summary: "A NAT Gateway exists. Confirm this was a conscious FinOps choice."

@@ -1,0 +1,137 @@
+# Default-deny in the app namespace, then punch the two holes the design
+# actually needs: cloudflared → app, and DNS egress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: edge
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# DNS (kube-dns / CoreDNS lives in kube-system, ClusterIP 10.44.0.10 by default).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: edge
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # ClusterIP DNS is often reached by IP, not by namespace selector alone.
+    - to:
+        - ipBlock:
+            cidr: 10.44.0.0/16
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-cloudflared
+  namespace: edge
+spec:
+  podSelector:
+    matchLabels:
+      app: edge-echo
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudflare-tunnel
+          podSelector:
+            matchLabels:
+              app: cloudflared
+        # in-namespace probes (kubelet HTTP on the CNI IP)
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: edge
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# App egress is none by default. Add an explicit policy if the product
+# must call an upstream. Do not "allow all" to make a demo work.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: edge
+spec:
+  podSelector:
+    matchLabels:
+      app: edge-echo
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared-egress
+  namespace: cloudflare-tunnel
+spec:
+  podSelector:
+    matchLabels:
+      app: cloudflared
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: [] # nobody connects in; cloudflared dials out
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: edge
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Cloudflare edge — anycast, cannot pin a CIDR that will stay true.
+    # Restrict to 443; the host SG is the next layer.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: UDP
+          port: 443

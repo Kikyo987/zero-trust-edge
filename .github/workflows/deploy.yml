@@ -1,0 +1,121 @@
+# Deploy over Tailscale. The runner joins the tailnet as tag:ci, scp's
+# nothing public, and never opens SSH to the world.
+#
+# Required GitHub Environment "production" secrets:
+#   TAILSCALE_OAUTH_CLIENT_ID
+#   TAILSCALE_OAUTH_CLIENT_SECRET
+#   # optional if you rotate the tunnel from CI:
+#   CLOUDFLARE_TUNNEL_TOKEN
+#
+# Required variables:
+#   NODE_TAILSCALE_IP   e.g. 100.64.1.10
+#   NODE_SSH_USER       e.g. ubuntu
+#
+# AWS is optional. If AWS_ROLE_ARN is set we use OIDC, not access keys.
+
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "git ref to deploy"
+        required: false
+        default: "main"
+  push:
+    branches: [main]
+    paths:
+      - "k3s/**"
+      - "docker/app/**"
+      - "monitoring/**"
+      - ".github/workflows/deploy.yml"
+
+permissions:
+  contents: read
+  id-token: write
+  packages: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          oauth-client-id: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+          tags: tag:ci
+          # Ephemeral: the runner disappears from the tailnet when the job ends.
+          args: --ssh --timeout=30s
+
+      - name: wait for node
+        env:
+          NODE: ${{ vars.NODE_TAILSCALE_IP }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 15); do
+            if tailscale ping --c 1 --timeout 3s "$NODE"; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "node $NODE is not reachable over Tailscale" >&2
+          tailscale status
+          exit 1
+
+      - name: AWS OIDC (optional)
+        if: ${{ vars.AWS_ROLE_ARN != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: apply manifests over Tailscale SSH
+        env:
+          NODE: ${{ vars.NODE_TAILSCALE_IP }}
+          USER: ${{ vars.NODE_SSH_USER || 'ubuntu' }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/edge-echo:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Tailscale SSH: identity is the GitHub Action node tagged tag:ci.
+          # ACL must allow tag:ci → tag:node:22.
+          ssh -o StrictHostKeyChecking=accept-new \
+              -o BatchMode=yes \
+              "${USER}@${NODE}" "sudo mkdir -p /opt/edge && sudo chown ${USER}:${USER} /opt/edge"
+
+          tar czf /tmp/edge.tgz k3s monitoring scripts cloudflare
+          scp -o StrictHostKeyChecking=accept-new /tmp/edge.tgz "${USER}@${NODE}:/opt/edge/edge.tgz"
+          ssh "${USER}@${NODE}" bash -se <<EOF
+            set -euo pipefail
+            cd /opt/edge
+            tar xzf edge.tgz
+            # Pin the image digest/tag that CI just built.
+            sudo sed -i "s|image: ghcr.io/.*/edge-echo:.*|image: ${IMAGE}|" k3s/manifests/20-app.yaml
+            if command -v kubectl >/dev/null && sudo test -f /etc/rancher/k3s/k3s.yaml; then
+              sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl apply -f k3s/manifests/
+              sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n edge rollout status deploy/edge-echo --timeout=120s
+            else
+              echo "k3s not installed yet; files dropped at /opt/edge"
+            fi
+          EOF
+
+      - name: verify
+        env:
+          NODE: ${{ vars.NODE_TAILSCALE_IP }}
+          USER: ${{ vars.NODE_SSH_USER || 'ubuntu' }}
+        run: |
+          ssh -o BatchMode=yes "${USER}@${NODE}" "sudo /opt/edge/scripts/zero-trust-verify.sh"
+
+      - name: logout of tailnet
+        if: always()
+        run: sudo tailscale logout || true

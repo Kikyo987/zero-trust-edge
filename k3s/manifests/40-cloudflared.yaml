@@ -1,0 +1,117 @@
+# Named tunnel connector. The token is a Secret, not an annotation.
+# cloudflared dials Cloudflare outbound; there is no inbound listener.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tunnel-token
+  namespace: cloudflare-tunnel
+type: Opaque
+stringData:
+  # Replace from Cloudflare Zero Trust → Networks → Tunnels → token.
+  # Never commit a real token. CI / k3s apply from a sealed source.
+  token: "REPLACE_WITH_TUNNEL_TOKEN"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tunnel-config
+  namespace: cloudflare-tunnel
+data:
+  config.yaml: |
+    # protocol http2 is the safe fallback if QUIC + MTU misbehave.
+    protocol: auto
+    metrics: 0.0.0.0:2000
+    no-autoupdate: true
+    ingress:
+      - hostname: app.example.com
+        service: http://edge-echo.edge.svc.cluster.local:8080
+        originRequest:
+          connectTimeout: 10s
+          keepAliveTimeout: 90s
+          # 8 KB POSTs must survive. Disable chunked-length surprises.
+          httpHostHeader: app.example.com
+      - hostname: grafana.example.com
+        service: http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80
+        originRequest:
+          connectTimeout: 10s
+      - service: http_status:404
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: cloudflare-tunnel
+  labels:
+    app: cloudflared
+spec:
+  replicas: 2 # two connectors, still one named tunnel
+  selector:
+    matchLabels:
+      app: cloudflared
+  template:
+    metadata:
+      labels:
+        app: cloudflared
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "2000"
+        prometheus.io/path: "/metrics"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cloudflared
+          image: cloudflare/cloudflared:2024.12.2
+          args:
+            - tunnel
+            - --no-autoupdate
+            - --config
+            - /etc/cloudflared/config.yaml
+            - run
+            - --token
+            - $(TUNNEL_TOKEN)
+          env:
+            - name: TUNNEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: tunnel-token
+                  key: token
+          ports:
+            - name: metrics
+              containerPort: 2000
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/cloudflared
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: tunnel-config
+        - name: tmp
+          emptyDir:
+            sizeLimit: 8Mi

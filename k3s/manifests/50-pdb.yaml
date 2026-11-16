@@ -1,0 +1,24 @@
+# Keep one cloudflared and one app pod through a node drain. On a
+# single-node cluster this is documentation; it becomes real the moment
+# a second node exists.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: edge-echo
+  namespace: edge
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: edge-echo
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cloudflared
+  namespace: cloudflare-tunnel
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: cloudflared

@@ -1,0 +1,26 @@
+# Weekly idle-resource hunt. Needs AWS OIDC (vars.AWS_ROLE_ARN) with
+# read-only CE / EC2 / ELB permissions. Fails the job if a NAT Gateway
+# or 0.0.0.0/0 inbound SG appears — that is a regression, not a bill.
+name: cost-snapshot
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  snapshot:
+    if: ${{ vars.AWS_ROLE_ARN != '' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      - name: snapshot
+        run: ./scripts/cost-snapshot.sh
