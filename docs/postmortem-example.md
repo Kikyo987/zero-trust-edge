@@ -188,7 +188,3 @@ Status / Severity / Impact window / Time to mitigation / Date / Author
 ## 8. Lessons
 ## 9. Appendix
 ```
-
----
-
-Cloud Native Network Engineer | Zero Trust · Terraform · k3s · Cloudflare

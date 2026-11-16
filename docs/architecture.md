@@ -445,7 +445,3 @@ people. HA is a second node in `10.42.11.0/24`, not a new architecture.
 | [../terraform/modules/security/main.tf](../terraform/modules/security/main.tf) | Empty ingress, strict egress |
 | [../k3s/manifests/10-network-policy.yaml](../k3s/manifests/10-network-policy.yaml) | Default-deny + holes |
 | [../scripts/zero-trust-verify.sh](../scripts/zero-trust-verify.sh) | Handover check |
-
----
-
-Cloud Native Network Engineer | Zero Trust · Terraform · k3s · Cloudflare

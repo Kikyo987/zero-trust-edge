@@ -6,7 +6,7 @@
 
 A public SSH port, a public `:443` on the origin, and a load balancer in front of a single node are the default shape of a small production. They are also the default incident.
 
-This repository is a working **Zero Trust** edge for a Cloud Native Network Engineer: **users never reach the origin IP**. They terminate on Cloudflare. A named **Cloudflare Tunnel** dials *out*, so the node needs **no public inbound ports**. Operators and CI join a **Tailscale** mesh. Workloads run on **k3s** (or Docker). **Terraform** lays down the VPC and the empty security group.
+This repository is a **demo** of a Zero Trust edge: **users never reach the origin IP**. They terminate on Cloudflare. A named **Cloudflare Tunnel** dials *out*, so the node needs **no public inbound ports**. Operators and CI join a **Tailscale** mesh. Workloads run on **k3s** (or Docker). **Terraform** lays down the VPC and the empty security group.
 
 The design is explicit about three properties:
 
@@ -249,8 +249,6 @@ MIT license.
 
 ---
 
-## About the author
+## About
 
-Built to demonstrate production-grade zero-trust edge architecture. Background in traditional networking (CCNA/NP) combined with cloud-native tooling.
-
-This repository is the working sample of a **Cloud Native Network Engineer**: **Cloudflare Tunnel**, **Zero Trust** Access, **Tailscale**, **k3s**, and **Terraform**, with **no public inbound ports**.
+This is a reference/demo, not a product. It applies a traditional networking background (CCNA/NP) to a small-team edge: outbound tunnel, mesh for operators, empty inbound security group.

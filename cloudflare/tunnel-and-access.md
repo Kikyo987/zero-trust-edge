@@ -464,7 +464,3 @@ optionally `protocol: http2` on the tunnel.
 
 It is the minimum identity-aware edge that a small team can run
 without a VPN appliance and without a public SSH port.
-
----
-
-Cloud Native Network Engineer | Zero Trust · Terraform · k3s · Cloudflare
