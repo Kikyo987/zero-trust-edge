@@ -44,8 +44,12 @@ tf-validate: ## validate the dev env (requires init)
 	cd terraform/environments/dev && terraform validate
 
 .PHONY: verify
-verify: ## Host zero-trust checks (run on the node)
+verify: ## Zero-trust inbound checks (auto: compose laptop or node)
 	./scripts/zero-trust-verify.sh
+
+.PHONY: verify-compose
+verify-compose: ## Laptop/compose: prove 127.0.0.1-only publishes
+	./scripts/zero-trust-verify.sh --compose
 
 .PHONY: mtu
 mtu: ## Path MTU probe

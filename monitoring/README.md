@@ -33,9 +33,25 @@ cp telegram_chat_id.example telegram_chat_id
 
 Do not put the webhook in `alertmanager.yml`. That file is committed.
 
-## Dashboard
+## Prove Grafana is working (60 seconds)
 
-`grafana/dashboards/edge-overview.json` is provisioned automatically:
+`make dev-up` already provisions `grafana/dashboards/edge-overview.json`
+(`uid: edge-overview`). No import click.
+
+1. Open http://127.0.0.1:3000 (admin / password from `.env`).
+2. Dashboards → Edge → **Edge overview**.
+3. The **scrape health** row should show `UP` for `edge-echo`,
+   `prometheus`, `node`, `cadvisor` within ~30s.
+4. Hit the app a few times, then the **edge-echo request rate** panel
+   moves:
+
+```bash
+for i in $(seq 1 20); do curl -sS -o /dev/null http://127.0.0.1:8080/; done
+```
+
+If Grafana were published on `0.0.0.0:3000`, `./scripts/zero-trust-verify.sh --compose` would FAIL. The compose file binds `127.0.0.1:3000`.
+
+## Dashboard panels
 
 - scrape health (`up`)
 - host CPU / memory (node-exporter)

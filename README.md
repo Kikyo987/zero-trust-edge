@@ -80,16 +80,31 @@ cp docker/compose/.env.example docker/compose/.env
 make dev-up
 ```
 
-Confirm the bind address and the app:
+Confirm the origin is up **and** that it is not on the public internet. Expected output is on the right of `#`:
 
 ```bash
 docker compose -f docker/compose/docker-compose.yml port edge-echo 8080
-# expected: 127.0.0.1:8080
+# 127.0.0.1:8080
+# if this prints 0.0.0.0:8080 the inbound posture is wrong
 
 curl -sS http://127.0.0.1:8080/healthz
-# expected: ok
+# ok
 
-curl -sS http://127.0.0.1:8080/metrics | head
+ss -lnt | grep 8080 || true
+# LISTEN ... 127.0.0.1:8080  0.0.0.0:*
+# there must be no line with 0.0.0.0:8080 or *:8080
+```
+
+Same checks wrapped as a script (compose profile; no sudo, no Tailscale):
+
+```bash
+./scripts/zero-trust-verify.sh --compose
+#   [PASS] compose publishes only 127.0.0.1 (or no host ports)
+#   [PASS] edge-echo mapped to 127.0.0.1:8080
+#   [PASS] GET 127.0.0.1:8080/healthz -> ok
+#   [PASS] edge-echo user=65532:65532 (non-root)
+# RESULT  PASS  no public inbound ports
+# (a WARN about 0.0.0.0:22 on your laptop is the host SSH daemon, not this stack)
 ```
 
 Open locally (still loopback):
@@ -100,6 +115,9 @@ Open locally (still loopback):
 | Grafana | http://127.0.0.1:3000 |
 | Prometheus | http://127.0.0.1:9090 |
 | Loki | http://127.0.0.1:3100 |
+| Alertmanager | http://127.0.0.1:9093 |
+
+Grafana is provisioned with **Edge overview** (`uid: edge-overview`). After `make dev-up`, open it and confirm the `up` panel is green for `edge-echo`, `prometheus`, and `node`. That is the observability proof; nothing on that dashboard is bound to `0.0.0.0`.
 
 Optional — attach a real named tunnel to this compose stack (still no inbound ports):
 
