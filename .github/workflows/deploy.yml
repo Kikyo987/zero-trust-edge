@@ -1,17 +1,16 @@
-# Deploy over Tailscale. The runner joins the tailnet as tag:ci, scp's
-# nothing public, and never opens SSH to the world.
+# Deploy over Tailscale. Manual only — a push must not create a GitHub
+# Environment deployment on a repo that has no production node yet.
 #
-# Required GitHub Environment "production" secrets:
+# Repository secrets (Settings → Secrets and variables → Actions):
 #   TAILSCALE_OAUTH_CLIENT_ID
 #   TAILSCALE_OAUTH_CLIENT_SECRET
-#   # optional if you rotate the tunnel from CI:
-#   CLOUDFLARE_TUNNEL_TOKEN
+#   CLOUDFLARE_TUNNEL_TOKEN          # optional
 #
-# Required variables:
+# Repository variables:
 #   NODE_TAILSCALE_IP   e.g. 100.64.1.10
 #   NODE_SSH_USER       e.g. ubuntu
-#
-# AWS is optional. If AWS_ROLE_ARN is set we use OIDC, not access keys.
+#   AWS_ROLE_ARN        # optional, OIDC — no long-lived AWS keys
+#   AWS_REGION          # optional, default us-east-1
 
 name: deploy
 
@@ -22,13 +21,6 @@ on:
         description: "git ref to deploy"
         required: false
         default: "main"
-  push:
-    branches: [main]
-    paths:
-      - "k3s/**"
-      - "docker/app/**"
-      - "monitoring/**"
-      - ".github/workflows/deploy.yml"
 
 permissions:
   contents: read
@@ -36,13 +28,12 @@ permissions:
   packages: read
 
 concurrency:
-  group: deploy-production
+  group: deploy
   cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-24.04
-    environment: production
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

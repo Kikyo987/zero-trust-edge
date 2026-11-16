@@ -22,7 +22,7 @@ cloudflared tunnel create edge-zero
 
 Store the token in:
 
-- GitHub Environment `production` as `CLOUDFLARE_TUNNEL_TOKEN`, or
+- GitHub Actions repository secret `CLOUDFLARE_TUNNEL_TOKEN`, or
 - a Kubernetes Secret (`k3s/manifests/40-cloudflared.yaml`), or
 - systemd `EnvironmentFile=/etc/edge/cloudflared.env` with `0600`
 

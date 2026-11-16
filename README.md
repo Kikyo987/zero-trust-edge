@@ -76,8 +76,8 @@ DNS for `app.example.com` is a CNAME to `*.cfargotunnel.com`. Scanning the node 
 Requires Docker 24+ and Compose v2. No cloud account is needed for this path. Nothing is published on `0.0.0.0`.
 
 ```bash
-git clone https://github.com/Kikyo987/cloud-native-network-engineer.git
-cd cloud-native-network-engineer
+git clone https://github.com/Kikyo987/zero-trust-edge.git
+cd zero-trust-edge
 
 cp docker/compose/.env.example docker/compose/.env
 # set GRAFANA_ADMIN_PASSWORD before the first up
@@ -134,7 +134,7 @@ On a fresh Ubuntu 24.04 host:
 
 ```bash
 # 1. Copy the repo (over the provider serial console, or once, before locking SSH)
-git clone https://github.com/Kikyo987/cloud-native-network-engineer.git /opt/edge
+git clone https://github.com/Kikyo987/zero-trust-edge.git /opt/edge
 cd /opt/edge
 
 # 2. Host hardening: deny inbound, pin MTU 1500, install Tailscale + cloudflared
@@ -197,7 +197,7 @@ Then SSM or, once Tailscale user-data has joined, SSH to `100.x` and continue fr
 
 ### CI
 
-`.github/workflows/deploy.yml` joins the tailnet as `tag:ci` and applies manifests over Tailscale SSH. Required GitHub Environment secrets: `TAILSCALE_OAUTH_CLIENT_ID`, `TAILSCALE_OAUTH_CLIENT_SECRET`. Optional AWS: GitHub OIDC → `vars.AWS_ROLE_ARN`. There is no long-lived `AWS_SECRET_ACCESS_KEY` in the happy path.
+`.github/workflows/deploy.yml` is **manual** (`workflow_dispatch`). It joins the tailnet as `tag:ci` and applies manifests over Tailscale SSH. Repository secrets: `TAILSCALE_OAUTH_CLIENT_ID`, `TAILSCALE_OAUTH_CLIENT_SECRET`. Optional AWS: GitHub OIDC → `vars.AWS_ROLE_ARN`. There is no long-lived `AWS_SECRET_ACCESS_KEY` in the happy path. It does not run on every push, so the repo page does not grow a fake production environment.
 
 ---
 
