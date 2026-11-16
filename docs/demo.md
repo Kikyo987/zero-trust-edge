@@ -1,14 +1,11 @@
-# Demo
+# Walkthrough
 
 There is no hosted public application and no standing Cloudflare hostname
 for this repository. The walkthrough is this page, the diagram, the lab
-commands, and a short narrated recording of those same artifacts.
+commands, and the short terminal recording linked from the README.
 
-**Recording:** [walkthrough.mp4](walkthrough.mp4) (about three and a half
-minutes). The voice is synthesized speech reading this page. The pictures
-are the diagram and the lab evidence in the repository. It does not show
-a live login to Cloudflare or Tailscale, because those accounts were not
-used, and it does not point at a public application URL.
+A before-and-after write-up of open ports, attack surface, monthly cost,
+and the MTU black hole is in [case-study.md](case-study.md).
 
 ![Dual-plane edge](diagrams/dual-plane.svg)
 
@@ -117,7 +114,7 @@ secrets, the remote steps are skipped and the workflow stays green.
 Production is a manual `workflow_dispatch` choice, and it keeps GitHub
 Environment protection. Nothing in CI dials a live Cloudflare account.
 
-## 6. What this demo does not contain
+## 6. What this walkthrough does not contain
 
 - A public URL for the app. Do not look for one.
 - A Cloudflare Access login or an MFA prompt from a real tenant.

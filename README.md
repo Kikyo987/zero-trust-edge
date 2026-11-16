@@ -7,19 +7,21 @@
 [![security](https://github.com/Kikyo987/zero-trust-edge/actions/workflows/security.yml/badge.svg)](https://github.com/Kikyo987/zero-trust-edge/actions/workflows/security.yml)
 [![deploy](https://github.com/Kikyo987/zero-trust-edge/actions/workflows/deploy.yml/badge.svg)](https://github.com/Kikyo987/zero-trust-edge/actions/workflows/deploy.yml)
 
-## Demo
+This is a minimal, workable Zero Trust edge for a small team to use as a reference. The Compose path and the security-test harness have been run locally, and a temporary VPS was used for a real external port scan. It is not a hosted product, and there is no standing public app URL.
 
-There is no standing public app URL. The demo is the page, the diagram, and a short English recording of this repository's own evidence.
+## Walkthrough
+
+The recording below is a short terminal walkthrough of this repository's lab isolation checks and the MTU reproduction. It is not a live Cloudflare login, and it is not a hosted app.
 
 https://github.com/user-attachments/assets/bb172a0c-4652-4432-a688-d9c01b4103be
-- [Demo page](docs/demo.md) — architecture, who can reach what, commands, and the temporary VPS scan.
-- [Walkthrough recording](docs/demo/walkthrough.mp4) — about three minutes. Diagram, lab checks, the public-IP scan, and the MTU reproduction. Not a live Cloudflare login.
+- [Walkthrough page](docs/demo.md) — architecture, who can reach what, commands, and the temporary VPS scan.
+- [Before and after](docs/case-study.md) — open ports, attack surface, monthly cost, and the MTU black hole.
 
 ![Dual-plane edge: users through Cloudflare to the Service network, operators through Tailscale](docs/evidence/architecture-dual-plane.png)
 
 A public SSH port, a public `:443` on the origin, and a load balancer in front of a single node are the default shape of a small production. They are also the default incident.
 
-This repository is a **demo** of a Zero Trust edge: **users never reach the origin IP**. They terminate on Cloudflare. A named **Cloudflare Tunnel** dials *out*, so the node needs **no public inbound ports**. Operators and CI join a **Tailscale** mesh. Workloads run on **k3s** (or Docker). **Terraform** lays down the VPC and the empty security group.
+This repository is a **reference implementation** of a Zero Trust edge: **users never reach the origin IP**. They terminate on Cloudflare. A named **Cloudflare Tunnel** dials *out*, so the node needs **no public inbound ports**. Operators and CI join a **Tailscale** mesh. Workloads run on **k3s** (or Docker). **Terraform** lays down the VPC and the empty security group.
 
 The design is explicit about three properties:
 
@@ -295,7 +297,8 @@ sudo ./scripts/zero-trust-verify.sh
 
 | Doc | Contents |
 | --- | --- |
-| [Demo walkthrough](docs/demo.md) | Architecture, commands, VPS scan, and [recording](docs/demo/walkthrough.mp4) |
+| [Walkthrough](docs/demo.md) | Architecture, commands, and the temporary VPS scan |
+| [Before and after](docs/case-study.md) | Open ports, attack surface, monthly cost, and the MTU black hole |
 | [Temporary lab VPS](docs/evidence/lab-vps/README.md) | External scan of 45.32.107.245. 22 was open. |
 | [Architecture](docs/architecture.md) | Data flow, security boundaries, why this design |
 | [ADR 0001](docs/adr/0001-zero-trust-edge.md) | Why Tunnel + Tailscale, not a VPN or public LB |
@@ -313,4 +316,4 @@ MIT license.
 
 ## About
 
-This is a reference/demo, not a product. It applies a traditional networking background (CCNA/NP) to a small-team edge: outbound tunnel, mesh for operators, empty inbound security group.
+This is a reference implementation, not a product. It has been exercised on a local Compose stack and scanned on a temporary VPS. It applies a traditional networking background (CCNA/NP) to a small-team edge: outbound tunnel, mesh for operators, empty inbound security group.
