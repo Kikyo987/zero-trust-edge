@@ -59,3 +59,6 @@ k3s.yaml
 # Monitoring local data
 monitoring/data/
 docker/compose/data/
+monitoring/alertmanager/secrets/discord_webhook_url
+monitoring/alertmanager/secrets/telegram_bot_token
+monitoring/alertmanager/secrets/telegram_chat_id

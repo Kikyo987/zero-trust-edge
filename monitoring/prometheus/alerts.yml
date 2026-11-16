@@ -10,6 +10,22 @@ groups:
           summary: "edge-echo is not scraping"
           description: "The origin behind the tunnel is gone. Users will 1033/502."
 
+      - alert: NodeExporterDown
+        expr: up{job="node"} == 0
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "node-exporter is down — host metrics are blind"
+
+      - alert: CadvisorDown
+        expr: up{job="cadvisor"} == 0
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "cAdvisor is down — container metrics are blind"
+
       - alert: HighErrorRate
         expr: |
           sum(rate(edge_echo_requests_total{code=~"5.."}[5m]))
@@ -22,6 +38,39 @@ groups:
         annotations:
           summary: "5xx rate > 5% over 10m"
 
+      - alert: HostCPUHigh
+        expr: 1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.85
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "host CPU > 85% for 15m (k3s + Loki fighting for a 2 GB box?)"
+
+      - alert: HostMemLow
+        expr: (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) < 0.10
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "available memory < 10%"
+
+      - alert: DiskFilling
+        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes) < 0.15
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "filesystem < 15% free (Loki chunks / containerd?)"
+
+      - alert: ContainerOOM
+        expr: increase(container_oom_events_total[15m]) > 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "a container OOM-killed in the last 15m"
+          description: "{{ $labels.name }} on {{ $labels.instance }}"
+
       - alert: PMTUDBroken
         expr: probe_icmp_df_ok{size="1472"} == 0
         for: 5m
@@ -29,9 +78,7 @@ groups:
           severity: page
         annotations:
           summary: "Path MTU discovery failed at 1472 bytes"
-          description: |
-            Jumbo frames or dropped ICMP dest-unreach. GET will work, POST
-            will hang. See docs/postmortem-example.md.
+          description: "GET will work, POST will hang. See docs/postmortem-example.md."
 
       - alert: CloudflareOriginTimeouts
         expr: increase(cloudflared_tunnel_request_errors_total[5m]) > 10
@@ -40,15 +87,6 @@ groups:
           severity: page
         annotations:
           summary: "cloudflared is seeing origin errors"
-          description: "Usually MTU, a dead Service, or NetworkPolicy drop."
-
-      - alert: DiskFilling
-        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.15
-        for: 15m
-        labels:
-          severity: ticket
-        annotations:
-          summary: "root filesystem < 15% free (Loki chunks?)"
 
       - alert: NatGatewayPresent
         expr: aws_nat_gateway_count > 0

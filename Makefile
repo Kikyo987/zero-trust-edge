@@ -11,11 +11,12 @@ help:
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 .PHONY: dev-up
-dev-up: ## Run app + Prometheus + Grafana + Loki bound to 127.0.0.1
+dev-up: ## Run app + Prometheus + Grafana + Loki + node-exporter + cAdvisor
 	$(COMPOSE) up -d --build
-	@echo "app       http://127.0.0.1:8080/healthz"
-	@echo "grafana   http://127.0.0.1:3000"
-	@echo "prometheus http://127.0.0.1:9090"
+	@echo "app          http://127.0.0.1:8080/healthz"
+	@echo "grafana      http://127.0.0.1:3000"
+	@echo "prometheus   http://127.0.0.1:9090"
+	@echo "alertmanager http://127.0.0.1:9093"
 
 .PHONY: dev-down
 dev-down: ## Stop the local stack

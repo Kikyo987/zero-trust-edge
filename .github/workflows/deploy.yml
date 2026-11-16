@@ -1,44 +1,121 @@
-# Deploy over Tailscale. Manual only — a push must not create a GitHub
-# Environment deployment on a repo that has no production node yet.
+# Build with Buildx, push to GHCR, deploy over Tailscale, health-check,
+# roll back the previous image if the new ReplicaSet is not ready.
 #
-# Repository secrets (Settings → Secrets and variables → Actions):
-#   TAILSCALE_OAUTH_CLIENT_ID
-#   TAILSCALE_OAUTH_CLIENT_SECRET
-#   CLOUDFLARE_TUNNEL_TOKEN          # optional
+# Manual only. A push must not create GitHub Deployments on a repo
+# that has no node yet. Pick staging or production at dispatch time.
 #
-# Repository variables:
-#   NODE_TAILSCALE_IP   e.g. 100.64.1.10
-#   NODE_SSH_USER       e.g. ubuntu
-#   AWS_ROLE_ARN        # optional, OIDC — no long-lived AWS keys
-#   AWS_REGION          # optional, default us-east-1
+# Per-environment (Settings → Environments → staging | production):
+#   secrets: TAILSCALE_OAUTH_CLIENT_ID, TAILSCALE_OAUTH_CLIENT_SECRET
+#   vars:    NODE_TAILSCALE_IP, NODE_SSH_USER
+#
+# ACL: tag:ci → tag:node:22  (see cloudflare/tailscale-acl.hujson)
 
 name: deploy
 
 on:
   workflow_dispatch:
     inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
       ref:
-        description: "git ref to deploy"
+        description: "git ref to build and deploy"
         required: false
         default: "main"
+      skip_build:
+        description: "Skip Buildx and reuse the existing GHCR tag for this SHA"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+  packages: write
   id-token: write
-  packages: read
 
 concurrency:
-  group: deploy
+  group: deploy-${{ github.event.inputs.environment }}
   cancel-in-progress: false
 
+env:
+  GO_VERSION: "1.27.2"
+
 jobs:
-  deploy:
+  build:
+    if: ${{ github.event.inputs.skip_build == 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.ref || github.ref }}
+          ref: ${{ github.event.inputs.ref }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        run: |
+          set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          IMAGE="ghcr.io/${OWNER}/edge-echo"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/app
+          target: runtime
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:${{ github.event.inputs.environment }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            environment=${{ github.event.inputs.environment }}
+
+  deploy:
+    needs: [build]
+    if: ${{ always() && (needs.build.result == 'success' || github.event.inputs.skip_build == 'true') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: ${{ github.event.inputs.environment }}
+    env:
+      NODE: ${{ vars.NODE_TAILSCALE_IP }}
+      USER: ${{ vars.NODE_SSH_USER || 'ubuntu' }}
+      TARGET_ENV: ${{ github.event.inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+
+      - name: resolve image
+        id: image
+        run: |
+          set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          if [[ "${{ github.event.inputs.skip_build }}" == "true" ]]; then
+            echo "ref=ghcr.io/${OWNER}/edge-echo:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=ghcr.io/${OWNER}/edge-echo@${{ needs.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Tailscale
         uses: tailscale/github-action@v2
@@ -46,64 +123,119 @@ jobs:
           oauth-client-id: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
           tags: tag:ci
-          # Ephemeral: the runner disappears from the tailnet when the job ends.
           args: --ssh --timeout=30s
 
       - name: wait for node
-        env:
-          NODE: ${{ vars.NODE_TAILSCALE_IP }}
         run: |
           set -euo pipefail
+          if [[ -z "${NODE}" ]]; then
+            echo "NODE_TAILSCALE_IP is not set on environment ${TARGET_ENV}" >&2
+            exit 1
+          fi
           for i in $(seq 1 15); do
-            if tailscale ping --c 1 --timeout 3s "$NODE"; then
+            if tailscale ping --c 1 --timeout 3s "${NODE}"; then
               exit 0
             fi
             sleep 2
           done
-          echo "node $NODE is not reachable over Tailscale" >&2
+          echo "node ${NODE} is not reachable over Tailscale" >&2
           tailscale status
           exit 1
 
-      - name: AWS OIDC (optional)
-        if: ${{ vars.AWS_ROLE_ARN != '' }}
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
-
-      - name: apply manifests over Tailscale SSH
-        env:
-          NODE: ${{ vars.NODE_TAILSCALE_IP }}
-          USER: ${{ vars.NODE_SSH_USER || 'ubuntu' }}
-          IMAGE: ghcr.io/${{ github.repository_owner }}/edge-echo:${{ github.sha }}
+      - name: snapshot current image
+        id: prev
         run: |
           set -euo pipefail
-          # Tailscale SSH: identity is the GitHub Action node tagged tag:ci.
-          # ACL must allow tag:ci → tag:node:22.
-          ssh -o StrictHostKeyChecking=accept-new \
-              -o BatchMode=yes \
-              "${USER}@${NODE}" "sudo mkdir -p /opt/edge && sudo chown ${USER}:${USER} /opt/edge"
+          PREV="$(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes \
+            "${USER}@${NODE}" \
+            "sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n edge get deploy edge-echo -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true")"
+          echo "image=${PREV}" >> "$GITHUB_OUTPUT"
+          echo "previous image: ${PREV:-none}"
 
+      - name: apply and health-check
+        id: apply
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+          PREV: ${{ steps.prev.outputs.image }}
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes "${USER}@${NODE}" "sudo mkdir -p /opt/edge && sudo chown ${USER}:${USER} /opt/edge"
           tar czf /tmp/edge.tgz k3s monitoring scripts cloudflare
           scp -o StrictHostKeyChecking=accept-new /tmp/edge.tgz "${USER}@${NODE}:/opt/edge/edge.tgz"
-          ssh "${USER}@${NODE}" bash -se <<EOF
-            set -euo pipefail
-            cd /opt/edge
-            tar xzf edge.tgz
-            # Pin the image digest/tag that CI just built.
-            sudo sed -i "s|image: ghcr.io/.*/edge-echo:.*|image: ${IMAGE}|" k3s/manifests/20-app.yaml
-            if command -v kubectl >/dev/null && sudo test -f /etc/rancher/k3s/k3s.yaml; then
-              sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl apply -f k3s/manifests/
-              sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n edge rollout status deploy/edge-echo --timeout=120s
-            else
-              echo "k3s not installed yet; files dropped at /opt/edge"
-            fi
-          EOF
 
-      - name: verify
+          ssh -o BatchMode=yes "${USER}@${NODE}" \
+            "IMAGE=$(printf %q "${IMAGE}") PREV=$(printf %q "${PREV}") TARGET_ENV=$(printf %q "${TARGET_ENV}") bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd /opt/edge
+          tar xzf edge.tgz
+          sudo sed -i "s|image: ghcr.io/.*/edge-echo:.*|image: ${IMAGE}|" k3s/manifests/20-deployment.yaml
+
+          KCTL="sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl"
+          if ! command -v kubectl >/dev/null || ! sudo test -f /etc/rancher/k3s/k3s.yaml; then
+            echo "k3s not installed; files dropped at /opt/edge"
+            exit 20
+          fi
+
+          ${KCTL} apply -f k3s/manifests/
+          ${KCTL} -n edge annotate deploy/edge-echo \
+            deployment.kubernetes.io/revision-history-limit=5 \
+            environment="${TARGET_ENV}" \
+            --overwrite
+
+          # Rollout: wait until the new ReplicaSet is ready, then probe
+          # the Service from inside the cluster (no public inbound).
+          if ! ${KCTL} -n edge rollout status deploy/edge-echo --timeout=120s; then
+            echo "ROLLING_BACK rollout status failed"
+            exit 30
+          fi
+
+          # distroless has no shell — probe from a throwaway alpine pod
+          # against the ClusterIP (no public inbound).
+          probe() {
+            local name="$1" script="$2"
+            ${KCTL} -n edge delete pod "${name}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+            ${KCTL} -n edge run "${name}" --restart=Never --image=alpine:3.21 --command -- \
+              /bin/sh -c "${script}"
+            ${KCTL} -n edge wait --for=jsonpath='{.status.phase}'=Succeeded pod/"${name}" --timeout=30s
+            ${KCTL} -n edge logs "${name}"
+            ${KCTL} -n edge delete pod "${name}" --wait=false >/dev/null 2>&1 || true
+          }
+
+          if ! probe "healthz-ci" "wget -qO- --timeout=5 http://edge-echo.edge.svc:8080/healthz | grep -q ok"; then
+            echo "ROLLING_BACK healthz failed"
+            exit 31
+          fi
+
+          # 8 KiB POST — the MTU canary. GET-only health checks lie.
+          if ! probe "readyz-ci" "dd if=/dev/zero bs=8192 count=1 of=/tmp/p 2>/dev/null; wget -qO- --timeout=8 --post-file=/tmp/p http://edge-echo.edge.svc:8080/readyz | grep -q ready"; then
+            echo "ROLLING_BACK large POST /readyz failed (MTU?)"
+            exit 32
+          fi
+
+          echo "health-check passed env=${TARGET_ENV} image=${IMAGE}"
+          REMOTE
+
+      - name: rollback
+        if: failure() && steps.apply.outcome == 'failure' && steps.prev.outputs.image != ''
         env:
-          NODE: ${{ vars.NODE_TAILSCALE_IP }}
-          USER: ${{ vars.NODE_SSH_USER || 'ubuntu' }}
+          PREV: ${{ steps.prev.outputs.image }}
+        run: |
+          set -euo pipefail
+          echo "rolling back to ${PREV}"
+          ssh -o BatchMode=yes "${USER}@${NODE}" \
+            "PREV=$(printf %q "${PREV}") bash -s" <<'REMOTE'
+          set -euo pipefail
+          KCTL="sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl"
+          ${KCTL} -n edge rollout undo deploy/edge-echo || \
+            ${KCTL} -n edge set image deploy/edge-echo edge-echo="${PREV}"
+          ${KCTL} -n edge rollout status deploy/edge-echo --timeout=120s
+          ${KCTL} -n edge get deploy,rs,pods -o wide
+          REMOTE
+          echo "rollback to ${PREV} complete"
+          exit 1
+
+      - name: zero-trust verify
+        if: success()
         run: |
           ssh -o BatchMode=yes "${USER}@${NODE}" "sudo /opt/edge/scripts/zero-trust-verify.sh"
 

@@ -69,6 +69,70 @@ services:
       edge-echo:
         condition: service_healthy
 
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    restart: unless-stopped
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/host/root
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+      - --web.listen-address=:9100
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro
+    # No host port. Prometheus scrapes over the compose network.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 64m
+    cpus: "0.10"
+    networks:
+      - edge
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    restart: unless-stopped
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=15s
+      - --disable_metrics=percpu,process,sched,tcp,udp,disk,diskIO,hugetlb
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+    # Privileged is the usual cadvisor tax. We still do not publish :8080.
+    privileged: true
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 192m
+    cpus: "0.25"
+    networks:
+      - edge
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/etc/alertmanager/start.sh"]
+    volumes:
+      - ../../monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ../../monitoring/alertmanager/start.sh:/etc/alertmanager/start.sh:ro
+      - ../../monitoring/alertmanager/secrets:/etc/alertmanager/secrets:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 64m
+    cpus: "0.10"
+    networks:
+      - edge
+
   prometheus:
     image: prom/prometheus:v2.55.1
     restart: unless-stopped
@@ -84,6 +148,10 @@ services:
       - prometheus-data:/prometheus
     ports:
       - "127.0.0.1:9090:9090"
+    depends_on:
+      - alertmanager
+      - node-exporter
+      - cadvisor
     read_only: true
     tmpfs:
       - /tmp
@@ -183,3 +251,4 @@ volumes:
   loki-data:
   grafana-data:
   alloy-data:
+  alertmanager-data:

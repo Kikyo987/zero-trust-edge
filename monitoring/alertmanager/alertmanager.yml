@@ -1,0 +1,62 @@
+# Alertmanager. Default route → Discord. Pages also go to Telegram
+# if the bot token file is present. Empty/placeholder files keep the
+# process up on a laptop with no webhooks.
+#
+# Secrets are files, not this YAML:
+#   secrets/discord_webhook_url      full Discord webhook URL, one line
+#   secrets/telegram_bot_token       bot token from @BotFather
+#   secrets/telegram_chat_id         numeric chat id, one line
+#
+# Copy secrets/*.example and fill them. Never commit the real files.
+
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: discord
+  group_by: [alertname, severity, cluster]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - receiver: telegram
+      matchers:
+        - severity = page
+      group_wait: 10s
+      repeat_interval: 1h
+      continue: true
+    - receiver: discord
+      continue: false
+
+inhibit_rules:
+  - source_matchers:
+      - severity = page
+    target_matchers:
+      - severity = ticket
+    equal: [alertname]
+
+receivers:
+  - name: discord
+    discord_configs:
+      - webhook_url_file: /etc/alertmanager/secrets/discord_webhook_url
+        title: '{{ .Status | toUpper }} {{ .CommonLabels.alertname }}'
+        message: |
+          **{{ .CommonLabels.severity }}** on {{ .CommonLabels.cluster }}
+          {{ range .Alerts }}
+          {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          {{ end }}
+        send_resolved: true
+
+  - name: telegram
+    telegram_configs:
+      - bot_token_file: /etc/alertmanager/secrets/telegram_bot_token
+        chat_id: 0 # replaced at start by the wrapper; see docker-compose
+        parse_mode: HTML
+        disable_notifications: false
+        send_resolved: true
+        message: |
+          <b>{{ .Status | toUpper }} {{ .CommonLabels.alertname }}</b>
+          severity={{ .CommonLabels.severity }}
+          {{ range .Alerts }}{{ .Annotations.summary }}
+          {{ end }}
