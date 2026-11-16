@@ -114,10 +114,12 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
-          docker tag edge-echo:ci "${IMAGE}:${GITHUB_SHA}"
-          docker tag edge-echo:ci "${IMAGE}:dev"
-          docker push "${IMAGE}:${GITHUB_SHA}"
-          docker push "${IMAGE}:dev"
+          # GHCR repository names must be lowercase (owner Kikyo987 → kikyo987).
+          IMAGE_LC="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/edge-echo"
+          docker tag edge-echo:ci "${IMAGE_LC}:${GITHUB_SHA}"
+          docker tag edge-echo:ci "${IMAGE_LC}:dev"
+          docker push "${IMAGE_LC}:${GITHUB_SHA}"
+          docker push "${IMAGE_LC}:dev"
 
   yaml:
     runs-on: ubuntu-24.04
