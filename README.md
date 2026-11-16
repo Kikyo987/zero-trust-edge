@@ -1,8 +1,13 @@
-# How to run production workloads with zero public inbound ports
+# How to run k3s with Cloudflare Tunnel, Tailscale, and no public inbound ports
+
+<!-- Replace REPLACE_WITH_YOUR_LOOM_LINK with a public Loom (or YouTube) URL.
+     Record ~3 minutes: empty inbound SG, Cloudflare Access challenge, Tailscale SSH, k3s pods.
+     Do not commit a private/passworded recording. -->
+> **Demo**: [Watch 3-min walkthrough](https://www.loom.com/share/REPLACE_WITH_YOUR_LOOM_LINK)
 
 A public SSH port, a public `:443` on the origin, and a load balancer in front of a single node are the default shape of a small production. They are also the default incident.
 
-This repository is a working answer: **users never reach the origin IP**. They terminate on Cloudflare. A named **Cloudflare Tunnel** dials *out* to Cloudflare, so the node does not need an inbound listener. Operators and CI join a **Tailscale** mesh. Workloads run on **k3s** or **Docker**, behind **network segmentation** that is default-deny.
+This repository is a working **Zero Trust** edge for a Cloud Native Network Engineer: **users never reach the origin IP**. They terminate on Cloudflare. A named **Cloudflare Tunnel** dials *out*, so the node needs **no public inbound ports**. Operators and CI join a **Tailscale** mesh. Workloads run on **k3s** (or Docker). **Terraform** lays down the VPC and the empty security group.
 
 The design is explicit about three properties:
 
@@ -18,38 +23,28 @@ Packet-level rationale, CIDR plan, MTU, and NAT behaviour: **[docs/architecture.
 
 ## Architecture
 
+Internet to origin, one line (GitHub renders this left-to-right):
+
 ```mermaid
 flowchart LR
-  Internet["Internet"] --> Cloudflare["Cloudflare<br/>WAF · TLS · Zero Trust Access"]
-  Cloudflare --> Tunnel["cloudflared Tunnel<br/>outbound TCP/443 only"]
-  Tunnel --> Private["Private Network<br/>Tailscale mesh + ACL"]
-  Private --> Workloads["k3s / Docker<br/>ClusterIP · default-deny"]
+  A[Internet] --> B[Cloudflare Zero Trust]
+  B --> C[Cloudflare Tunnel]
+  C --> D[Tailscale private network]
+  D --> E[k3s / Docker]
 ```
 
-Two actors, two doors, one private network:
+Users and operators use different doors. Neither door is a public port on the node:
 
 ```mermaid
 flowchart TB
-  Users["Users on the Internet"]
-  Ops["Operators and CI"]
+  Users[Users] --> Access[Cloudflare Access]
+  Access --> WAF[WAF and TLS]
+  WAF --> Named[Named Tunnel]
+  Named --> CFD[cloudflared]
+  CFD --> App[k3s / Docker]
 
-  subgraph Cloudflare["Cloudflare"]
-    Access["Zero Trust Access<br/>IdP / MFA / device posture"]
-    WAF["WAF + TLS 1.3"]
-    Named["Named Tunnel"]
-  end
-
-  subgraph Private["Private network — no public inbound"]
-    TS["Tailscale<br/>tag:ops · tag:ci · tag:node"]
-    CFD["cloudflared"]
-    subgraph Work["Workloads"]
-      K3S["k3s · Traefik · NetworkPolicy"]
-      Docker["Docker Compose · 127.0.0.1 only"]
-    end
-  end
-
-  Users --> Access --> WAF --> Named --> CFD --> Work
-  Ops --> TS --> Work
+  Ops[Operators and CI] --> TS[Tailscale ACL]
+  TS --> App
 ```
 
 DNS for `app.example.com` is a CNAME to `*.cfargotunnel.com`. Scanning the node — if it even has a public address — returns **no open ports**. SSH, kube-apiserver, Grafana, and Prometheus bind to `100.64.0.0/10` and loopback.
@@ -234,4 +229,8 @@ MIT license.
 
 ---
 
-Cloud Native Network Engineer | Zero Trust · Terraform · k3s · Cloudflare
+## About the author
+
+Built to demonstrate production-grade zero-trust edge architecture. Background in traditional networking (CCNA/NP) combined with cloud-native tooling.
+
+This repository is the working sample of a **Cloud Native Network Engineer**: **Cloudflare Tunnel**, **Zero Trust** Access, **Tailscale**, **k3s**, and **Terraform**, with **no public inbound ports**.
