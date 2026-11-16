@@ -2,7 +2,9 @@
 
 There is no hosted public application and no standing Cloudflare hostname
 for this repository. The walkthrough is this page, the diagram, the lab
-commands, and the short terminal recording linked from the README.
+commands, and the 3-minute README recording of `git clone`, `make dev-up`,
+`./scripts/zero-trust-verify.sh --compose`, and the Grafana Edge overview
+dashboard on loopback (reached through an SSH tunnel in that recording).
 
 A before-and-after write-up of open ports, attack surface, monthly cost,
 and the MTU black hole is in [case-study.md](case-study.md).

@@ -11,9 +11,11 @@ This is a minimal, workable Zero Trust edge for a small team to use as a referen
 
 ## Walkthrough
 
-The recording below is a short terminal walkthrough of this repository's lab isolation checks and the MTU reproduction. It is not a live Cloudflare login, and it is not a hosted app.
+The recording below is a 3-minute walkthrough of `git clone`, `make dev-up`, `./scripts/zero-trust-verify.sh --compose` (PASS), and the Grafana **Edge overview** dashboard at `http://127.0.0.1:3000`. Grafana is reached on loopback — in this recording, through an SSH tunnel. It is not a live Cloudflare login, and it is not a hosted app.
 
-https://github.com/user-attachments/assets/bb172a0c-4652-4432-a688-d9c01b4103be
+On the lab VPS used here, the verify script also prints a WARN because host SSH still listens on `0.0.0.0:22`. The compose publishes stay on `127.0.0.1`. A production node should use `--node` and fail if port 22 is public.
+
+https://github.com/user-attachments/assets/5f5e8dfb-89ca-418b-b589-00c848eedb61
 - [Walkthrough page](docs/demo.md) — architecture, who can reach what, commands, and the temporary VPS scan.
 - [Before and after](docs/case-study.md) — open ports, attack surface, monthly cost, and the MTU black hole.
 
