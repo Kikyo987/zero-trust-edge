@@ -1,3 +1,6 @@
+
+
+
 # How to run k3s with Cloudflare Tunnel, Tailscale, and no public inbound ports
 
 [![ci](https://github.com/Kikyo987/zero-trust-edge/actions/workflows/ci.yml/badge.svg)](https://github.com/Kikyo987/zero-trust-edge/actions/workflows/ci.yml)
@@ -8,8 +11,7 @@
 
 There is no standing public app URL. The demo is the page, the diagram, and a short English recording of this repository's own evidence.
 
-https://github.com/user-attachments/assets/e8c93244-3e62-4422-8c25-946d79d2937a
-
+https://github.com/user-attachments/assets/bb172a0c-4652-4432-a688-d9c01b4103be
 - [Demo page](docs/demo.md) — architecture, who can reach what, commands, and the temporary VPS scan.
 - [Walkthrough recording](docs/demo/walkthrough.mp4) — about three minutes. Diagram, lab checks, the public-IP scan, and the MTU reproduction. Not a live Cloudflare login.
 
