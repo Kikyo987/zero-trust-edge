@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Classify a deploy workflow run.
 #
-#   deploy-outcome.sh <preflight> <build> <deploy> <can_deploy>
+#   deploy-outcome.sh <preflight> <build> <deploy> <remote>
+#
+# remote is "true" only when the deploy job actually logged into the
+# tailnet. A green deploy job with remote unset or "false" is SKIPPED:
+# push to main with no staging secrets does not deploy.
 #
 # Prints one word: SUCCESS, SKIPPED, or FAILURE, then a reason.
 # Exit 0 for SUCCESS and SKIPPED. Exit 1 for FAILURE.
@@ -10,7 +14,7 @@
 set -euo pipefail
 
 classify() {
-  local preflight="$1" build="$2" deploy="$3" can="$4"
+  local preflight="$1" build="$2" deploy="$3" remote="$4"
   if [[ "${preflight}" != "success" ]]; then
     printf 'FAILURE\npreflight result=%s\n' "${preflight}"
     return 1
@@ -19,19 +23,19 @@ classify() {
     printf 'FAILURE\nimage build or push result=%s; deploy did not run\n' "${build}"
     return 1
   fi
-  if [[ "${can}" != "true" ]]; then
-    printf 'SKIPPED\nremote deploy skipped (Tailscale secrets or NODE_TAILSCALE_IP unset)\n'
-    return 0
+  if [[ "${deploy}" == "failure" || "${deploy}" == "cancelled" ]]; then
+    printf 'FAILURE\ndeploy result=%s\n' "${deploy}"
+    return 1
   fi
-  if [[ "${deploy}" == "success" ]]; then
+  if [[ "${deploy}" == "success" && "${remote}" == "true" ]]; then
     printf 'SUCCESS\nrollout finished; digest and probes ran in the deploy job\n'
     return 0
   fi
-  if [[ "${deploy}" == "skipped" ]]; then
-    printf 'SKIPPED\ndeploy job skipped\n'
+  if [[ "${deploy}" == "success" || "${deploy}" == "skipped" ]]; then
+    printf 'SKIPPED\nremote deploy skipped (Tailscale secrets or NODE_TAILSCALE_IP unset; production is not selected by a push)\n'
     return 0
   fi
-  printf 'FAILURE\ndeploy result=%s\n' "${deploy}"
+  printf 'FAILURE\ndeploy result=%s remote=%s\n' "${deploy}" "${remote}"
   return 1
 }
 
@@ -55,6 +59,8 @@ self_test() {
   }
   expect SUCCESS 0 success success success true
   expect SUCCESS 0 success skipped success true
+  expect SKIPPED 0 success success success false
+  expect SKIPPED 0 success success success ""
   expect SKIPPED 0 success success skipped false
   expect SKIPPED 0 success skipped skipped false
   expect FAILURE 1 success failure skipped true
@@ -75,7 +81,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
 fi
 
 if [[ "$#" -ne 4 ]]; then
-  echo "usage: deploy-outcome.sh <preflight> <build> <deploy> <can_deploy>" >&2
+  echo "usage: deploy-outcome.sh <preflight> <build> <deploy> <remote>" >&2
   exit 2
 fi
 

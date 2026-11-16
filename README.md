@@ -1,8 +1,17 @@
 # How to run k3s with Cloudflare Tunnel, Tailscale, and no public inbound ports
 
-<!-- Optional later: record a public Loom of docs/demo.md and swap the href.
-     Do not point at a placeholder URL — it 404s on GitHub. -->
-> **Demo**: [3-min walkthrough](docs/demo.md) — packet path, local prove-it commands, expected output.
+[![ci](https://github.com/Kikyo987/zero-trust-edge/actions/workflows/ci.yml/badge.svg)](https://github.com/Kikyo987/zero-trust-edge/actions/workflows/ci.yml)
+[![security](https://github.com/Kikyo987/zero-trust-edge/actions/workflows/security.yml/badge.svg)](https://github.com/Kikyo987/zero-trust-edge/actions/workflows/security.yml)
+[![deploy](https://github.com/Kikyo987/zero-trust-edge/actions/workflows/deploy.yml/badge.svg)](https://github.com/Kikyo987/zero-trust-edge/actions/workflows/deploy.yml)
+
+## Demo
+
+There is no standing public app URL. The demo is the page, the diagram, and a short English recording of this repository's own evidence.
+
+- [Demo page](docs/demo.md) — architecture, who can reach what, commands, and the temporary VPS scan.
+- [Walkthrough recording](docs/demo/walkthrough.mp4) — about three minutes. Diagram, lab checks, the public-IP scan, and the MTU reproduction. Not a live Cloudflare login.
+
+![Dual-plane edge: users through Cloudflare to the Service network, operators through Tailscale](docs/evidence/architecture-dual-plane.png)
 
 A public SSH port, a public `:443` on the origin, and a load balancer in front of a single node are the default shape of a small production. They are also the default incident.
 
@@ -49,7 +58,9 @@ Same picture, with CIDRs: [docs/diagrams/dual-plane.svg](docs/diagrams/dual-plan
 | User | People using the product | Cloudflare Access → named tunnel → `cloudflared` → ClusterIP / compose DNS → `edge-echo` | Tailscale, public `:443` on the node |
 | Operator | `group:ops`, `tag:ci` | Tailscale ACL → `100.x` (`:22`, and for ops also kubectl and Grafana) | The tunnel, the app's public hostname |
 
-DNS for `app.example.com` is a CNAME to `*.cfargotunnel.com`. Scanning the node — if it even has a public address — returns **no open ports**. SSH, kube-apiserver, Grafana, and Prometheus bind to `100.64.0.0/10` and loopback.
+DNS for `app.example.com` is a CNAME to `*.cfargotunnel.com`. The design target is that a scan of the node returns no open business ports: SSH, kube-apiserver, Grafana, and Prometheus bind to `100.64.0.0/10` and loopback.
+
+That target was **not** fully met on the temporary lab VPS used to collect a real external scan. See the next section. Do not read the design sentence above as a claim about `45.32.107.245`.
 
 ---
 
@@ -62,7 +73,7 @@ DNS for `app.example.com` is a CNAME to `*.cfargotunnel.com`. Scanning the node 
 | Kubernetes | `k3s/` | Pinned version, disjoint CIDRs, default-deny NetworkPolicy, Traefik as ClusterIP |
 | Identity | `cloudflare/`, `tailscale/acl.hujson` | Named tunnel + Access policies; tag-based ACL |
 | IaC | `terraform/` | Modular VPC / SG / compute, remote state, empty ingress on the node SG |
-| CI/CD | `.github/workflows/` | Build + Trivy; deploy over Tailscale (`tag:ci` → `tag:node`) |
+| CI/CD | `.github/workflows/` | PR: test, Trivy, security lab. Push to `main`: same, plus a staging deploy that skips when secrets are absent |
 | Observability | `monitoring/` | Prometheus, Grafana, Loki, Alloy — private only |
 | Ops | `docs/`, `scripts/`, `security-tests/` | FinOps model, simulated MTU lab, `zero-trust-verify.sh`, security-test report |
 
@@ -212,7 +223,31 @@ Then SSM or, once Tailscale user-data has joined, SSH to `100.x` and continue fr
 
 ### CI
 
-`.github/workflows/deploy.yml` is **manual** (`workflow_dispatch`). It joins the tailnet as `tag:ci` and applies manifests over Tailscale SSH. Repository secrets: `TAILSCALE_OAUTH_CLIENT_ID`, `TAILSCALE_OAUTH_CLIENT_SECRET`. Optional AWS: GitHub OIDC → `vars.AWS_ROLE_ARN`. There is no long-lived `AWS_SECRET_ACCESS_KEY` in the happy path. It does not run on every push, so the repo page does not grow a fake production environment.
+Three workflows. Two of them run by themselves. The third deploys only when the staging or production environment is actually configured.
+
+| Workflow | When it runs | What it does | What it does not do |
+| --- | --- | --- | --- |
+| [ci.yml](.github/workflows/ci.yml) | Every pull request, and every push to `main` | `go test`, Terraform fmt/validate, kubeconform, Trivy on the image | It does not SSH anywhere |
+| [security.yml](.github/workflows/security.yml) | Every pull request, and every push to `main` | Lab security checks and the MTU black-hole reproduction | It does not call Cloudflare or Tailscale |
+| [deploy.yml](.github/workflows/deploy.yml) | Every push to `main`, and `workflow_dispatch` | On a push, the job is pinned to the **staging** environment. If `TAILSCALE_OAUTH_CLIENT_ID`, `TAILSCALE_OAUTH_CLIENT_SECRET`, and `NODE_TAILSCALE_IP` are unset there, remote steps are skipped and the run stays green. A manual run can choose staging or production. | A push never selects production. A failed image push does not roll out a missing tag. |
+
+Environment protection on `staging` and `production` stays in front of the remote steps. Optional AWS access is GitHub OIDC (`vars.AWS_ROLE_ARN`). There is no long-lived `AWS_SECRET_ACCESS_KEY` in the happy path.
+
+Pass Tailscale variables as `sudo env ZTE_...`, not `sudo -E`. Some Ubuntu builds ignore `-E`.
+
+## Temporary public scan
+
+On 16 Nov 2026 a different host scanned a temporary Vultr lab VPS, `45.32.107.245`. The owner was going to shut that machine down after the test. Cloudflare, Tailscale, and k3s were not installed. UFW allowed only SSH.
+
+| Port | On that VPS |
+| --- | --- |
+| 22 | **Open.** SSH was the only access path. A finished node does not leave 22 on the public address. |
+| 80 and 443 | **Not open.** A scanner that intercepts outbound 80/443 can make `connect()` look instant. No SYN for those ports arrived on the VPS, and nothing was listening. |
+| 3000, 6443, 8080, 9090 | **Filtered** by UFW. |
+
+The `--production` script on that box is not a pass for Cloudflare, Tailscale, or kube-router. Those checks were SKIP. Its nmap was a self-scan and printed `closed` instead of `filtered`. The harness now refuses a scan of an address that belongs to the host running it.
+
+Detail: [docs/evidence/lab-vps/README.md](docs/evidence/lab-vps/README.md).
 
 ---
 
@@ -226,7 +261,14 @@ sudo ./security-tests/run.sh --lab
 # LAB evidence. It does not claim a production nmap result.
 ```
 
-A live node, with the owner's Cloudflare and Tailscale accounts, is `sudo ./security-tests/run.sh --production`. Missing account variables are SKIP, not PASS.
+A live node, with the owner's Cloudflare and Tailscale accounts, is:
+
+```bash
+sudo env ZTE_NODE_PUBLIC_IP=<public-ip> ZTE_APP_URL=https://app.example.com \
+  ./security-tests/run.sh --production
+```
+
+Run that nmap from a different machine. Missing account variables are SKIP, not PASS. `sudo -E` is not used.
 
 ```bash
 sudo ./scripts/zero-trust-verify.sh
@@ -249,7 +291,8 @@ sudo ./scripts/zero-trust-verify.sh
 
 | Doc | Contents |
 | --- | --- |
-| [Demo walkthrough](docs/demo.md) | 3-minute path + expected `verify` output |
+| [Demo walkthrough](docs/demo.md) | Architecture, commands, VPS scan, and [recording](docs/demo/walkthrough.mp4) |
+| [Temporary lab VPS](docs/evidence/lab-vps/README.md) | External scan of 45.32.107.245. 22 was open. |
 | [Architecture](docs/architecture.md) | Data flow, security boundaries, why this design |
 | [ADR 0001](docs/adr/0001-zero-trust-edge.md) | Why Tunnel + Tailscale, not a VPN or public LB |
 | [FinOps](docs/finops.md) | Monthly model, NAT Gateway avoidance |

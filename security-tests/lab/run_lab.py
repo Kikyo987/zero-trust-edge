@@ -512,10 +512,72 @@ def _manifest_ok() -> tuple[bool, str]:
     return ok and image_ok, "\n".join(lines)
 
 
+def mount_options(path: Path) -> str:
+    proc = subprocess.run(
+        ["findmnt", "-T", str(path), "-no", "OPTIONS"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.stdout.strip()
+
+
+def suid_workdir() -> Path | None:
+    """A directory whose mount honors the setuid bit. Never /tmp.
+
+    Ubuntu 26.10 mounts /tmp as a nosuid tmpfs. A helper built there
+    cannot become root, so the control run cannot prove that
+    NO_NEW_PRIVS is what stopped the escalation.
+    """
+    for candidate in (Path("/var/lib/zte-priv"), Path("/usr/local/lib/zte-priv")):
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            continue
+        opts = mount_options(candidate)
+        if not opts or "nosuid" in opts.split(","):
+            continue
+        return candidate
+    return None
+
+
+def module_state(name: str) -> str:
+    """What this kernel can say about a module, measured now."""
+    if Path(f"/sys/module/{name}").exists():
+        return "loaded"
+    release = platform.release()
+    root = Path(f"/lib/modules/{release}")
+    if not root.is_dir():
+        return "not measurable (no /lib/modules for this kernel)"
+    found = subprocess.run(
+        ["find", str(root), "-name", f"{name}.ko*", "-print", "-quit"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if found.stdout.strip():
+        return "present, not loaded"
+    return "not shipped on this kernel"
+
+
 def run_priv() -> Check:
     manifest_ok, manifest_log = _manifest_ok()
-    src = Path("/tmp/zte-escalate.c")
-    binary = Path("/tmp/zte-escalate")
+    work = suid_workdir()
+    if work is None:
+        tmp_opts = mount_options(Path("/tmp")) or "unreadable"
+        status = "FAIL" if not manifest_ok else "SKIP"
+        return Check(
+            "App container privilege escalation fails",
+            status,
+            "Setuid helper was not built. /tmp is not used, and no other suid-capable directory was found.",
+            manifest_log + f"\n/tmp mount options: {tmp_opts}",
+            [
+                "SKIP is not a pass. The deployment manifest was still read.",
+                "On Ubuntu 26.10, /tmp is often a nosuid tmpfs. Put the helper on the root filesystem.",
+            ],
+        )
+    src = work / "zte-escalate.c"
+    binary = work / "zte-escalate"
     src.write_text(
         textwrap.dedent(
             """\
@@ -539,6 +601,7 @@ def run_priv() -> Check:
         )
     os.chown(binary, 0, 0)
     os.chmod(binary, 0o4755)
+    helper_opts = mount_options(binary)
     libc = ctypes.CDLL("libc.so.6", use_errno=True)
 
     def preexec(lock: bool):
@@ -573,12 +636,18 @@ def run_priv() -> Check:
     log = "\n".join(
         [
             manifest_log,
+            f"helper {binary} mount options: {helper_opts or 'unknown'}",
             f"control (setuid bit, no NO_NEW_PRIVS) rc={control.returncode} {control.stdout.strip()} {control.stderr.strip()}",
             f"locked (PR_SET_NO_NEW_PRIVS) rc={locked.returncode} {locked.stdout.strip()} {locked.stderr.strip()}",
             raw.stdout.strip(),
             raw.stderr.strip(),
         ]
     )
+    try:
+        binary.unlink(missing_ok=True)
+        src.unlink(missing_ok=True)
+    except OSError:
+        pass
     ok = (
         manifest_ok
         and control.returncode == 0
@@ -601,6 +670,18 @@ def run_priv() -> Check:
             "Distroless has no shell; the behavioral twin is this helper plus the deployment securityContext.",
         ],
     )
+
+
+def local_ipv4() -> set[str]:
+    found: set[str] = set()
+    proc = subprocess.run(["ip", "-o", "-4", "addr", "show"], capture_output=True, text=True, check=False)
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if "inet" not in parts:
+            continue
+        cidr = parts[parts.index("inet") + 1]
+        found.add(cidr.split("/", 1)[0])
+    return found
 
 
 def production_checks() -> list[Check]:
@@ -628,28 +709,41 @@ def production_checks() -> list[Check]:
         "nmap -Pn -sT -p 22,80,443,6443,8080,3000,9090 \"$ZTE_NODE_PUBLIC_IP\"",
     )
     if ip:
-        proc = sh(
-            ["nmap", "-Pn", "-sT", "-p", "22,80,443,6443,8080,3000,9090", "--max-retries", "1", "--host-timeout", "40s", ip],
-            check=False,
-            timeout=60,
-        )
-        text = (proc.stdout or "") + (proc.stderr or "")
-        opened = [ln for ln in text.splitlines() if "/tcp" in ln and " open" in f" {ln} "]
-        # simpler:
-        opened = []
-        for ln in text.splitlines():
-            parts = ln.split()
-            if len(parts) >= 2 and "/tcp" in parts[0] and parts[1] == "open":
-                opened.append(parts[0])
-        out.append(
-            Check(
-                "External scan shows no open business inbound ports",
-                "FAIL" if opened or proc.returncode not in (0, 1) else "PASS",
-                f"nmap from this host against {ip}.",
-                text,
-                ["Production command output captured on this run. Do not reuse it for a different address."],
+        mine = local_ipv4()
+        if ip in mine:
+            out.append(
+                Check(
+                    "External scan shows no open business inbound ports",
+                    "FAIL",
+                    f"Refused: {ip} is a local address on this host. A self-scan is delivered locally and bypasses UFW, so 'closed' is not 'filtered'.",
+                    "local addresses: " + ", ".join(sorted(mine)) + f"\ntarget: {ip}\nnmap was not run.",
+                    [
+                        "Run nmap from a different machine: nmap -Pn -sT -p 22,80,443,6443,8080,3000,9090 " + ip,
+                        "This result is not external-scan evidence.",
+                    ],
+                )
             )
-        )
+        else:
+            proc = sh(
+                ["nmap", "-Pn", "-sT", "-p", "22,80,443,6443,8080,3000,9090", "--max-retries", "1", "--host-timeout", "40s", ip],
+                check=False,
+                timeout=60,
+            )
+            text = (proc.stdout or "") + (proc.stderr or "")
+            opened = []
+            for ln in text.splitlines():
+                parts = ln.split()
+                if len(parts) >= 2 and "/tcp" in parts[0] and parts[1] == "open":
+                    opened.append(parts[0])
+            out.append(
+                Check(
+                    "External scan shows no open business inbound ports",
+                    "FAIL" if opened or proc.returncode not in (0, 1) else "PASS",
+                    f"nmap from this host against {ip}. The target is not a local address.",
+                    text,
+                    ["Production command output captured on this run. Do not reuse it for a different address."],
+                )
+            )
 
     url = need(
         "Unauthorized user access to the app is denied",
@@ -802,7 +896,12 @@ def render(mode: str, checks: list[Check]) -> str:
         f"- **Counts:** {counts['PASS']} pass, {counts['FAIL']} fail, {counts['SKIP']} skip",
         "",
         "This file is generated by `security-tests/lab/run_lab.py`. "
-        "A LAB report is not evidence of a public VPS, Cloudflare Access, or a Tailscale tailnet.",
+        + (
+            "A LAB report is not evidence of a public VPS, Cloudflare Access, or a Tailscale tailnet."
+            if mode == "lab"
+            else "SKIP is not a pass for Cloudflare, Tailscale, or kube-router. "
+            "A scan of an address configured on this host is refused."
+        ),
         "",
         "| # | Test | Result |",
         "| --- | --- | --- |",
@@ -820,10 +919,10 @@ def render(mode: str, checks: list[Check]) -> str:
             "- Lab Tailscale-shaped addresses `100.64.1.2` (user), `100.64.1.6` (ci), `100.64.10.10` (node).",
             "- Pod-shaped addresses in `10.43.0.0/16` for the NetworkPolicy dataplane.",
             "",
-            "k3s was attempted on this kernel earlier in development of the test. "
-            "The network-policy controller exited because `ipset` returned `Invalid argument`, "
-            "and flannel VXLAN returned `operation not supported`. The Pod test therefore "
-            "enforces the manifest with iptables in a namespace, and says so.",
+            "Pod check, measured on this run: "
+            f"ip_set is {module_state('ip_set')}; vxlan is {module_state('vxlan')}. "
+            "The check enforces k3s/manifests/10-network-policy.yaml with iptables in a "
+            "network namespace. It does not install k3s and it is not a kube-router result.",
             "",
         ]
     else:
@@ -837,8 +936,9 @@ def render(mode: str, checks: list[Check]) -> str:
     lines += [
         "```bash",
         "sudo ./security-tests/run.sh --lab",
-        "# owner, on a real node, after exporting the ZTE_* variables in the report body:",
-        "sudo ./security-tests/run.sh --production",
+        "# pass variables on the command. sudo -E is ignored on some Ubuntu builds.",
+        "sudo env ZTE_NODE_PUBLIC_IP=<public-ip> ./security-tests/run.sh --production",
+        "# run that nmap from a different machine. A scan of this host's own address is refused.",
         "```",
         "",
     ]

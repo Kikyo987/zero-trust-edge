@@ -30,25 +30,39 @@ Network namespaces, iptables, and the policy files in the repo:
 
 SKIP is not PASS. The lab report does not contain production scan results.
 
-On this kernel, k3s's network-policy controller does not start (`ipset` and
-VXLAN are unavailable). A node with a normal kernel should re-run the Pod
-check under kube-router; the manifest is the same file.
+Each lab report states whether `ip_set` and `vxlan` are present on the
+kernel that just ran. The Pod check still uses iptables in a namespace.
+That is not a kube-router result, including on a kernel that has the modules.
 
-## What the owner runs against the real edge
+The setuid helper is built under `/var/lib/zte-priv` or
+`/usr/local/lib/zte-priv`, and only when that mount is not `nosuid`.
+`/tmp` is not used. If every candidate is `nosuid`, the check is SKIP
+and the report says why. The deployment manifest is still checked.
+
+## What the owner runs against a real edge
 
 ```bash
-export ZTE_NODE_PUBLIC_IP=203.0.113.50
-export ZTE_APP_URL=https://app.example.com
-# from a non-ops tailnet identity:
-export ZTE_USER_SSH_TARGET=ubuntu@100.x.y.z
-# from a tag:ci node:
-export ZTE_CI_GRAFANA_URL=http://100.x.y.z:3000
-export ZTE_CI_SSH_TARGET=ubuntu@100.x.y.z
-sudo -E ./security-tests/run.sh --production
+# Do not use sudo -E. Some Ubuntu sudo builds ignore it and drop ZTE_*.
+sudo env \
+  ZTE_NODE_PUBLIC_IP=203.0.113.50 \
+  ZTE_APP_URL=https://app.example.com \
+  ZTE_USER_SSH_TARGET=ubuntu@100.x.y.z \
+  ZTE_CI_GRAFANA_URL=http://100.x.y.z:3000 \
+  ZTE_CI_SSH_TARGET=ubuntu@100.x.y.z \
+  ./security-tests/run.sh --production
 ```
 
-Unset variables are recorded as SKIP. Do not paste another environment's
-output into this repository and call it the current run.
+Run the nmap from a machine that does not own `ZTE_NODE_PUBLIC_IP`.
+If the address is configured on the host running the script, the scan
+is refused: local delivery bypasses UFW and prints `closed` instead of
+`filtered`.
+
+Unset variables are SKIP. SKIP is not a pass for Cloudflare, Tailscale,
+or kube-router.
+
+A temporary public lab VPS (now shut down, or about to be) is documented
+in [docs/evidence/lab-vps/README.md](../docs/evidence/lab-vps/README.md).
+Port 22 was open there. That is not the finished design.
 
 ## MTU lab
 

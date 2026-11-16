@@ -1,57 +1,125 @@
-# 3-minute walkthrough
+# Demo
 
-No video host. This page is the demo: packet path, then commands you can run.
+There is no hosted public application and no standing Cloudflare hostname
+for this repository. The walkthrough is this page, the diagram, the lab
+commands, and a short narrated recording of those same artifacts.
 
-## 1. Packet path (~30 s)
+**Recording:** [walkthrough.mp4](walkthrough.mp4) (about three and a half
+minutes). The voice is synthesized speech reading this page. The pictures
+are the diagram and the lab evidence in the repository. It does not show
+a live login to Cloudflare or Tailscale, because those accounts were not
+used, and it does not point at a public application URL.
 
-Two planes. The tunnel does not enter Tailscale, and Tailscale is not how a user reaches the app.
+![Dual-plane edge](diagrams/dual-plane.svg)
 
-```mermaid
-flowchart LR
-  subgraph userPlane [User plane]
-    U[Internet users] --> CF[Cloudflare Access and WAF]
-    CF --> CFD[cloudflared]
-    CFD --> SVC["Service network<br/>edge-echo.edge.svc:8080"]
-    SVC --> APP[edge-echo]
-  end
-  subgraph opsPlane [Operator plane]
-    OPS[group:ops] --> ACL[Tailscale ACL]
-    CI[tag:ci] --> ACL
-    ACL --> NODE["node SSH :22"]
-  end
-```
+## 1. Two planes
 
-- Users never SYN the origin. Cloudflare Access is the identity check. **cloudflared** dials Cloudflare, then the app on the cluster Service or the compose DNS name.
-- Operators and CI never use public `:22`. **Tailscale** ACL tags (`group:ops`, `tag:ci`) are a second door, onto `100.x` only.
-- The node has **no public inbound ports**. Traefik / Compose bind ClusterIP or `127.0.0.1`.
+User packets and operator packets share a node. They do not share a path.
 
-Drawing with CIDRs: [diagrams/dual-plane.svg](diagrams/dual-plane.svg).
+| Who | Path | What they do not traverse |
+| --- | --- | --- |
+| A person using the product | Cloudflare Access and WAF, then `cloudflared` dialing out on 443, then `http://edge-echo.edge.svc.cluster.local:8080` | Tailscale, and any public listener on the node |
+| `group:ops` | Tailscale ACL to `100.x`: SSH, kubectl, Grafana, Prometheus | The tunnel |
+| `tag:ci` | Tailscale ACL to `100.x` tcp/22 only | Grafana, Prometheus, the tunnel |
 
-## 2. Prove it locally (~90 s)
+`cloudflare/config.yml` names the origin as the Kubernetes Service. It
+does not name a Tailscale address. DNS for the product name is a CNAME to
+`*.cfargotunnel.com`. There is no A record for the node.
+
+Drawing with the CIDRs: [diagrams/dual-plane.svg](diagrams/dual-plane.svg).
+Packet detail: [architecture.md](architecture.md).
+
+## 2. Who is allowed to do what
+
+Authentication, authorization, and reachability are three different
+questions. The ACL file is `tailscale/acl.hujson`.
+
+| Identity | Can reach | Cannot reach |
+| --- | --- | --- |
+| Someone who is not in the Access policy | Nothing on the origin. The lab proxy returns HTTP 403 and does not call the app. | SSH, Grafana |
+| `group:dev` (a normal tailnet member, not ops) | The product only after Access, in the real design | Node SSH. The lab drops tcp/22. |
+| `group:ops` | SSH, kubectl, Grafana, Prometheus, Loki on `100.x` | A grant they were not given. Port 8080 is not in the ops grant. |
+| `tag:ci` | Node SSH, so it can apply manifests | Grafana (tcp/3000). The lab connection times out. |
+| A pod that is not `cloudflared` and not a labeled probe | — | `edge-echo:8080`. The NetworkPolicy drops it. |
+
+The lab that produces those results is not Cloudflare and not a tailnet.
+It loads the policy files in this repo and enforces them with iptables
+in network namespaces. Run it:
 
 ```bash
 git clone https://github.com/Kikyo987/zero-trust-edge.git
 cd zero-trust-edge
-cp docker/compose/.env.example docker/compose/.env
-make dev-up
+sudo ./security-tests/run.sh --lab
 ```
 
-| Command | Expected |
+The report is `security-tests/reports/latest.md`. On a kernel that can
+honor the setuid bit outside `/tmp`, the seven checks pass. `/tmp` is
+not used for the setuid helper, because Ubuntu 26.10 mounts it `nosuid`.
+
+Local compose, still with nothing on `0.0.0.0`:
+
+```bash
+cp docker/compose/.env.example docker/compose/.env
+make dev-up
+docker compose -f docker/compose/docker-compose.yml port edge-echo 8080
+# 127.0.0.1:8080
+curl -sS http://127.0.0.1:8080/healthz
+# ok
+./scripts/zero-trust-verify.sh --compose
+```
+
+## 3. A real public address, honestly
+
+On 16 Nov 2026 a temporary Vultr lab VPS at `45.32.107.245` was scanned
+from a different host. The machine had about 1 GiB of RAM, Ubuntu 26.10,
+and UFW allowing only SSH. Cloudflare, Tailscale, and k3s were not
+installed. The owner was going to shut it down after the test.
+
+| Port | What was true on the VPS |
 | --- | --- |
-| `docker compose -f docker/compose/docker-compose.yml port edge-echo 8080` | `127.0.0.1:8080` |
-| `curl -sS http://127.0.0.1:8080/healthz` | `ok` |
-| `./scripts/zero-trust-verify.sh --compose` | `RESULT  PASS  no public inbound ports` |
+| 22 | **Open.** SSH was the only way in. A finished node would not look like this. |
+| 80, 443 | **Not open.** Some scanner networks intercept outbound 80/443 and a connect() can look instant. No SYN for those ports arrived on the VPS, and nothing was listening. |
+| 3000, 6443, 8080, 9090 | **Filtered** by UFW. |
 
-If `port` prints `0.0.0.0:8080`, the inbound posture is wrong.
+Write-up: [evidence/lab-vps/README.md](evidence/lab-vps/README.md).
 
-Grafana (also loopback): http://127.0.0.1:3000 → dashboard **Edge overview**. `up` should be green for `edge-echo` and `prometheus`.
+The `--production` run on that same box is not a pass. It skipped
+Cloudflare, Tailscale, and kube-router because those variables and that
+cluster were absent. Its nmap was a self-scan (0.00044 s) and is refused
+by the harness now, because a self-scan bypasses UFW.
 
-## 3. What you do **not** see (~30 s)
+## 4. GET works, a large POST can still be a black hole
 
-- No A/AAAA for the node in DNS (`app.example.com` is a CNAME to `*.cfargotunnel.com`).
-- No SG rule for `0.0.0.0/0` TCP 22/80/443 (`terraform/modules/security`).
-- Deploy is **manual** (`workflow_dispatch`). Push to `main` only builds and runs Trivy.
+Overlays own the MTU. With a 1280-byte hop and ICMP fragmentation-needed
+dropped, a small GET returns 200 and an 8 KB POST stalls. Restoring that
+ICMP message makes the same POST return `ready`. The timestamps in the
+narrative postmortem are invented. The lab commands are not.
 
-Longer form: [architecture.md](architecture.md) · [ADR 0001](adr/0001-zero-trust-edge.md) · [tunnel-and-access.md](../cloudflare/tunnel-and-access.md)
+```bash
+sudo ./security-tests/lab/mtu-blackhole.sh
+```
 
-<!-- Optional: record a Loom of the same three steps and swap the README Demo link to that URL. -->
+Transcript and capture from the cloud-agent lab:
+[evidence/mtu-lab/transcript.txt](evidence/mtu-lab/transcript.txt),
+[evidence/mtu-lab/pmtud-blackhole.pcap](evidence/mtu-lab/pmtud-blackhole.pcap).
+The same script also passed on the temporary VPS. That box's capture was
+not copied here, so it is not linked as if it were.
+
+Full write-up, labeled simulated: [postmortem-example.md](postmortem-example.md).
+
+## 5. What runs without you clicking deploy
+
+Every pull request and every push to `main` runs `ci.yml` (Go, Terraform,
+YAML, Trivy) and `security.yml` (the lab security checks and the MTU
+reproduction). A push to `main` also runs `deploy.yml` against the
+**staging** environment only. If that environment has no Tailscale
+secrets, the remote steps are skipped and the workflow stays green.
+Production is a manual `workflow_dispatch` choice, and it keeps GitHub
+Environment protection. Nothing in CI dials a live Cloudflare account.
+
+## 6. What this demo does not contain
+
+- A public URL for the app. Do not look for one.
+- A Cloudflare Access login or an MFA prompt from a real tenant.
+- A Tailscale admin console.
+- A claim that port 22 was closed on `45.32.107.245`. It was not.

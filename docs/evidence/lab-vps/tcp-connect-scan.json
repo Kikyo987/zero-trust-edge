@@ -1,0 +1,66 @@
+{
+  "scanner": "python3 socket TCP connect",
+  "source": "external box (not the VPS)",
+  "target": "45.32.107.245",
+  "started_utc": "2026-11-16T07:22:12.170900+00:00",
+  "note": "Temporary lab VPS provided by the owner for review testing; will be shut down after tests. Port 22 is expected open because Tailscale is not configured on this machine.",
+  "results": [
+    {
+      "host": "45.32.107.245",
+      "port": 22,
+      "status": "open",
+      "elapsed_ms": 344,
+      "timeout_s": 3.0,
+      "banner_len": 42,
+      "banner": "SSH-2.0-OpenSSH_10.5p1 Ubuntu-1ubuntu3.1\\r\\n"
+    },
+    {
+      "host": "45.32.107.245",
+      "port": 80,
+      "status": "open",
+      "elapsed_ms": 1001,
+      "timeout_s": 3.0,
+      "banner_len": 0
+    },
+    {
+      "host": "45.32.107.245",
+      "port": 443,
+      "status": "open",
+      "elapsed_ms": 1001,
+      "timeout_s": 3.0,
+      "banner_len": 0
+    },
+    {
+      "host": "45.32.107.245",
+      "port": 3000,
+      "status": "filtered_or_dropped",
+      "elapsed_ms": 3002,
+      "timeout_s": 3.0,
+      "banner_len": 0
+    },
+    {
+      "host": "45.32.107.245",
+      "port": 6443,
+      "status": "filtered_or_dropped",
+      "elapsed_ms": 3003,
+      "timeout_s": 3.0,
+      "banner_len": 0
+    },
+    {
+      "host": "45.32.107.245",
+      "port": 8080,
+      "status": "filtered_or_dropped",
+      "elapsed_ms": 3003,
+      "timeout_s": 3.0,
+      "banner_len": 0
+    },
+    {
+      "host": "45.32.107.245",
+      "port": 9090,
+      "status": "filtered_or_dropped",
+      "elapsed_ms": 3001,
+      "timeout_s": 3.0,
+      "banner_len": 0
+    }
+  ]
+}

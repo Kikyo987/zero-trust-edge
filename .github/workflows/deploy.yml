@@ -1,5 +1,14 @@
-# Remote deploy over Tailscale. Manual only, plus GitHub Environment
-# protection on staging/production.
+# Remote deploy over Tailscale.
+#
+# Two triggers:
+#   push to main — staging only. If the staging environment has no
+#     Tailscale secrets or NODE_TAILSCALE_IP, the remote steps are
+#     skipped and the workflow stays green. Production is never selected.
+#   workflow_dispatch — staging or production, with that environment's
+#     protection rules.
+#
+# A skipped remote deploy is SKIPPED, not SUCCESS. A failed image push
+# fails the build, and the node is not touched.
 #
 # Image tag is the commit that was checked out (`git rev-parse HEAD`),
 # not github.sha. On workflow_dispatch, github.sha is the workflow
@@ -24,6 +33,8 @@
 name: deploy
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       environment:
@@ -49,20 +60,19 @@ permissions:
   id-token: write
 
 concurrency:
-  group: deploy-${{ github.event.inputs.environment }}
+  group: deploy-${{ github.event_name == 'push' && 'staging' || github.event.inputs.environment }}
   cancel-in-progress: false
 
 jobs:
   preflight:
     runs-on: ubuntu-24.04
     outputs:
-      can_deploy: ${{ steps.gate.outputs.can_deploy }}
       do_build: ${{ steps.gate.outputs.do_build }}
       sha: ${{ steps.sha.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.ref || github.ref_name }}
+          ref: ${{ github.event_name == 'push' && github.sha || github.event.inputs.ref || github.ref_name }}
 
       - id: sha
         run: |
@@ -77,23 +87,13 @@ jobs:
 
       - id: gate
         env:
-          TS_ID: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
-          TS_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
-          NODE: ${{ vars.NODE_TAILSCALE_IP }}
           SKIP_BUILD: ${{ github.event.inputs.skip_build }}
         run: |
           set -euo pipefail
           do_build=true
           [[ "${SKIP_BUILD}" == "true" ]] && do_build=false
           echo "do_build=${do_build}" >> "$GITHUB_OUTPUT"
-
-          if [[ -n "${TS_ID}" && -n "${TS_SECRET}" && -n "${NODE}" ]]; then
-            echo "can_deploy=true" >> "$GITHUB_OUTPUT"
-            echo "Tailscale secrets and NODE_TAILSCALE_IP are set."
-          else
-            echo "can_deploy=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Skipping remote deploy: set TAILSCALE_OAUTH_CLIENT_ID/SECRET and NODE_TAILSCALE_IP on the ${{ github.event.inputs.environment }} environment."
-          fi
+          echo "event=${{ github.event_name }} do_build=${do_build}"
 
   build:
     needs: [preflight]
@@ -176,32 +176,58 @@ jobs:
 
   deploy:
     needs: [preflight, build]
-    if: ${{ always() && needs.preflight.result == 'success' && needs.preflight.outputs.can_deploy == 'true' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    if: ${{ always() && needs.preflight.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    environment: ${{ github.event.inputs.environment }}
+    environment: ${{ github.event_name == 'push' && 'staging' || github.event.inputs.environment }}
     outputs:
+      remote: ${{ steps.gate.outputs.remote }}
       external_probe: ${{ steps.external.outputs.status }}
       security_after_rollback: ${{ steps.rollback.outputs.security }}
       rollback: ${{ steps.rollback.outputs.attempted }}
     env:
       NODE: ${{ vars.NODE_TAILSCALE_IP }}
       USER: ${{ vars.NODE_SSH_USER || 'ubuntu' }}
-      TARGET_ENV: ${{ github.event.inputs.environment }}
+      TARGET_ENV: ${{ github.event_name == 'push' && 'staging' || github.event.inputs.environment }}
       SHA: ${{ needs.preflight.outputs.sha }}
     steps:
+      - name: remote gate
+        id: gate
+        env:
+          TS_ID: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
+          TS_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+          NODE: ${{ vars.NODE_TAILSCALE_IP }}
+        run: |
+          set -euo pipefail
+          echo "target environment: ${TARGET_ENV}"
+          if [[ "${TARGET_ENV}" == "production" && "${{ github.event_name }}" == "push" ]]; then
+            echo "push to main must not select production" >&2
+            exit 1
+          fi
+          if [[ -n "${TS_ID}" && -n "${TS_SECRET}" && -n "${NODE}" ]]; then
+            echo "remote=true" >> "$GITHUB_OUTPUT"
+            echo "Tailscale secrets and NODE_TAILSCALE_IP are set. Remote deploy will run."
+          else
+            echo "remote=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Remote deploy skipped for ${TARGET_ENV}. Set TAILSCALE_OAUTH_CLIENT_ID, TAILSCALE_OAUTH_CLIENT_SECRET, and NODE_TAILSCALE_IP on that environment. Production is not used by a push."
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.gate.outputs.remote == 'true'
         with:
           ref: ${{ needs.preflight.outputs.sha }}
 
       - name: assert checked-out sha
+        if: steps.gate.outputs.remote == 'true'
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${SHA}"
 
       - uses: docker/setup-buildx-action@v3
+        if: steps.gate.outputs.remote == 'true'
 
       - name: login
+        if: steps.gate.outputs.remote == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -209,6 +235,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: resolve image
+        if: steps.gate.outputs.remote == 'true'
         id: image
         env:
           BUILT_DIGEST: ${{ needs.build.outputs.digest }}
@@ -238,6 +265,7 @@ jobs:
           echo "deploying ${ref}@${digest}"
 
       - name: Tailscale
+        if: steps.gate.outputs.remote == 'true'
         uses: tailscale/github-action@v2
         with:
           oauth-client-id: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
@@ -246,6 +274,7 @@ jobs:
           args: --ssh --timeout=30s
 
       - name: wait for node
+        if: steps.gate.outputs.remote == 'true'
         run: |
           set -euo pipefail
           for i in $(seq 1 15); do
@@ -259,6 +288,7 @@ jobs:
           exit 1
 
       - name: snapshot current image
+        if: steps.gate.outputs.remote == 'true'
         id: prev
         run: |
           set -euo pipefail
@@ -273,6 +303,7 @@ jobs:
           echo "previous digest: ${digest:-none}"
 
       - name: apply
+        if: steps.gate.outputs.remote == 'true'
         id: apply
         env:
           IMAGE: ${{ steps.image.outputs.ref }}
@@ -302,6 +333,7 @@ jobs:
           echo "applied=true" >> "$GITHUB_OUTPUT"
 
       - name: wait for rollout and check digest
+        if: steps.gate.outputs.remote == 'true'
         id: digest
         env:
           IMAGE: ${{ steps.image.outputs.ref }}
@@ -332,6 +364,7 @@ jobs:
           REMOTE
 
       - name: in-cluster probes
+        if: steps.gate.outputs.remote == 'true'
         id: incluster
         run: |
           set -euo pipefail
@@ -368,6 +401,7 @@ jobs:
           REMOTE
 
       - name: external http probe
+        if: steps.gate.outputs.remote == 'true'
         id: external
         env:
           APP_URL: ${{ vars.APP_EXTERNAL_URL }}
@@ -394,7 +428,7 @@ jobs:
 
       - name: rollback
         id: rollback
-        if: failure() && steps.apply.outputs.applied == 'true'
+        if: failure() && steps.gate.outputs.remote == 'true' && steps.apply.outputs.applied == 'true'
         env:
           PREV: ${{ steps.prev.outputs.image }}
           PREV_DIGEST: ${{ steps.prev.outputs.digest }}
@@ -448,12 +482,12 @@ jobs:
           exit "${rc}"
 
       - name: zero-trust verify
-        if: success()
+        if: success() && steps.gate.outputs.remote == 'true'
         run: |
           ssh -o BatchMode=yes "${USER}@${NODE}" "sudo /opt/edge/scripts/zero-trust-verify.sh"
 
       - name: logout of tailnet
-        if: always()
+        if: always() && steps.gate.outputs.remote == 'true'
         continue-on-error: true
         run: sudo tailscale logout || true
 
@@ -468,7 +502,7 @@ jobs:
           PREFLIGHT: ${{ needs.preflight.result }}
           BUILD: ${{ needs.build.result }}
           DEPLOY: ${{ needs.deploy.result }}
-          CAN: ${{ needs.preflight.outputs.can_deploy }}
+          REMOTE: ${{ needs.deploy.outputs.remote }}
           SHA: ${{ needs.preflight.outputs.sha }}
           EXTERNAL: ${{ needs.deploy.outputs.external_probe }}
           ROLLBACK: ${{ needs.deploy.outputs.rollback }}
@@ -476,7 +510,7 @@ jobs:
         run: |
           set -euo pipefail
           set +e
-          summary="$(./scripts/deploy-outcome.sh "${PREFLIGHT}" "${BUILD}" "${DEPLOY}" "${CAN}")"
+          summary="$(./scripts/deploy-outcome.sh "${PREFLIGHT}" "${BUILD}" "${DEPLOY}" "${REMOTE}")"
           rc=$?
           set -e
           result="$(printf '%s\n' "${summary}" | head -1)"
@@ -492,6 +526,7 @@ jobs:
             echo "| preflight | ${PREFLIGHT} |"
             echo "| build | ${BUILD} |"
             echo "| deploy | ${DEPLOY} |"
+            echo "| remote tailnet | ${REMOTE:-false} |"
             echo "| external HTTP probe | ${EXTERNAL:-not-run} |"
             echo "| rollback | ${ROLLBACK:-not-attempted} |"
             echo "| security after rollback | ${ROLLBACK_SECURITY:-not-run} |"
