@@ -1,9 +1,8 @@
 # How to run k3s with Cloudflare Tunnel, Tailscale, and no public inbound ports
 
-<!-- Replace REPLACE_WITH_YOUR_LOOM_LINK with a public Loom (or YouTube) URL.
-     Record ~3 minutes: empty inbound SG, Cloudflare Access challenge, Tailscale SSH, k3s pods.
-     Do not commit a private/passworded recording. -->
-> **Demo**: [Watch 3-min walkthrough](https://www.loom.com/share/REPLACE_WITH_YOUR_LOOM_LINK)
+<!-- Optional later: record a public Loom of docs/demo.md and swap the href.
+     Do not point at a placeholder URL — it 404s on GitHub. -->
+> **Demo**: [3-min walkthrough](docs/demo.md) — packet path, local prove-it commands, expected output.
 
 A public SSH port, a public `:443` on the origin, and a load balancer in front of a single node are the default shape of a small production. They are also the default incident.
 
@@ -237,6 +236,7 @@ sudo ./scripts/zero-trust-verify.sh
 
 | Doc | Contents |
 | --- | --- |
+| [Demo walkthrough](docs/demo.md) | 3-minute path + expected `verify` output |
 | [Architecture](docs/architecture.md) | Data flow, security boundaries, why this design |
 | [ADR 0001](docs/adr/0001-zero-trust-edge.md) | Why Tunnel + Tailscale, not a VPN or public LB |
 | [FinOps](docs/finops.md) | Monthly model, NAT Gateway avoidance |
