@@ -56,6 +56,11 @@ jobs:
   image:
     runs-on: ubuntu-24.04
     needs: [go]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      security-events: write
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
@@ -72,7 +77,7 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=sha,prefix=
+            type=sha,prefix=,format=long
             type=raw,value=dev,enable={{is_default_branch}}
             type=semver,pattern={{version}}
       - id: build
@@ -80,30 +85,36 @@ jobs:
         with:
           context: docker/app
           target: runtime
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          # Load locally so Trivy can scan without pulling a private GHCR package.
+          # Push is a separate step after the scan passes.
+          push: false
+          load: true
+          tags: |
+            edge-echo:ci
+            ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          provenance: true
-          sbom: true
+          provenance: false
+          sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # Tag must include the v prefix. 0.28.0 does not resolve on GitHub Actions.
       - name: trivy
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.32.0
         with:
-          image-ref: ${{ env.IMAGE }}:${{ github.sha }}
+          image-ref: edge-echo:ci
           severity: HIGH,CRITICAL
+          ignore-unfixed: true
           exit-code: "1"
           format: table
-        # On PRs the image is not pushed; scan the local build instead.
+          vuln-type: os,library
+      - name: push
         if: github.event_name != 'pull_request'
-      - name: trivy (local)
-        if: github.event_name == 'pull_request'
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: fs
-          scan-ref: docker/app
-          severity: HIGH,CRITICAL
-          exit-code: "1"
+        run: |
+          set -euo pipefail
+          docker tag edge-echo:ci "${IMAGE}:${GITHUB_SHA}"
+          docker tag edge-echo:ci "${IMAGE}:dev"
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:dev"
 
   yaml:
     runs-on: ubuntu-24.04

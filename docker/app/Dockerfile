@@ -12,16 +12,13 @@
 FROM golang:1.22-bookworm AS build
 WORKDIR /src
 ENV CGO_ENABLED=0 GOOS=linux
-COPY go.mod go.sum* ./
+COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go build -trimpath -ldflags="-s -w -buildid=" -o /out/edge-echo .
-
-# Verify we are not linking libc (distroless static requirement).
-RUN file /out/edge-echo | grep -E 'statically linked|static-pie' || true
 
 FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 WORKDIR /

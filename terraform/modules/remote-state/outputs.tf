@@ -14,7 +14,7 @@ output "kms_key_arn" {
 }
 
 output "backend_hcl" {
-  value = <<-EOT
+  value       = <<-EOT
     terraform {
       backend "s3" {
         bucket         = "${aws_s3_bucket.state.bucket}"
