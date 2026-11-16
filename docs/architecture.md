@@ -1,280 +1,451 @@
 # Architecture
 
-This document is the packet-level source of truth for the edge. If a change
-alters CIDR, MTU, NAT, or who is allowed to initiate a flow, it belongs here
-before it belongs in Terraform.
+How this edge moves packets, where each security boundary sits, and why the
+shape is this one rather than “public `:443` plus a bastion.”
 
-## 1. Design goals
+The README is the operator view. This file is the packet view. If a change
+alters CIDR, MTU, NAT, identity, or who is allowed to *initiate* a flow, it
+belongs here before it belongs in Terraform.
 
-1. **Zero public inbound ports.** No SSH, no HTTP, no HTTPS listener on any
-   public address. Users arrive through Cloudflare. Operators arrive through
-   Tailscale. CI arrives through Tailscale with a narrower ACL than operators.
-2. **Explainable packet path.** Every hop has a CIDR, an MTU, and a security
-   control. “The tunnel is down” is a diagnosis, not a mystery.
-3. **Cost that a founder can read.** NAT Gateway is opt-in, not default. See
-   [finops.md](finops.md).
-4. **One engineer can operate it.** Single-node k3s is acceptable for the first
-   production. The CIDR and Terraform modules already have a second AZ so HA
-   is a scale-up, not a redesign.
+---
 
-## 2. Logical packet path
+## 1. The problem
 
-### User request (HTTPS)
+A typical small-team production looks like this:
 
 ```
-client
+Internet ──► :22 and :443 on a public IP ──► Nginx / kube ──► app
+Operator ──► the same :22
+```
+
+That design has three structural issues.
+
+1. The origin is on the internet. Shodan indexes it. A five-minute “open 22
+   from my laptop” becomes the incident.
+2. Identity is implied by network location. Anyone who can SYN `:443` is a
+   user; anyone who can SYN `:22` is an operator.
+3. The cost follows enterprise defaults (load balancer, NAT Gateway) even
+   when the workload is one node.
+
+The design in this repository inverts initiation:
+
+- Users do not connect to the origin. They connect to Cloudflare. The origin
+  dials Cloudflare.
+- Operators do not connect to a public SSH port. They join a Tailscale mesh.
+- The node can have **no public IP required**. Egress is enough.
+
+Keywords this document holds as invariants:
+
+| Invariant | Meaning here |
+| --- | --- |
+| **No public IP required** | A private ENI plus outbound 443 is a complete data path |
+| **Zero Trust Access** | Cloudflare Access (users) and Tailscale ACL tags (ops / CI) sit in front of every human action |
+| **Network segmentation** | VPC/SG, overlay ACL, Kubernetes NetworkPolicy, and the workload itself are independent layers |
+
+Cost-aware design is a constraint, not an afterthought: Cloudflare Tunnel and
+Tailscale replace a public load balancer and, in the default AWS path, a NAT
+Gateway. Numbers live in [finops.md](finops.md).
+
+---
+
+## 2. Reference diagram
+
+```mermaid
+flowchart LR
+  Internet["Internet"] --> Cloudflare["Cloudflare<br/>WAF · TLS · Zero Trust Access"]
+  Cloudflare --> Tunnel["cloudflared Tunnel<br/>outbound TCP/443 only"]
+  Tunnel --> Private["Private Network<br/>Tailscale mesh + ACL"]
+  Private --> Workloads["k3s / Docker"]
+```
+
+```mermaid
+flowchart TB
+  Users["Users"]
+  Ops["Operators / CI"]
+
+  subgraph Cloudflare["Cloudflare — identity for users"]
+    Access["Zero Trust Access"]
+    Edge["WAF + TLS 1.3"]
+    Named["Named Tunnel UUID"]
+  end
+
+  subgraph Private["Private network — no inbound from 0.0.0.0/0"]
+    TS["Tailscale ACL<br/>tag:ops / tag:ci / tag:node"]
+    CFD["cloudflared"]
+    subgraph Host["Node 10.42.10.0/24 or VPS"]
+      K3S["k3s · ClusterIP · NetworkPolicy"]
+      Docker["Compose bound to 127.0.0.1"]
+      App["edge-echo :8080 non-root"]
+    end
+  end
+
+  Users --> Access --> Edge --> Named --> CFD --> App
+  Ops --> TS --> Host
+```
+
+DNS for product hostnames is a CNAME to `<TUNNEL-UUID>.cfargotunnel.com`.
+There is no A/AAAA record for the node. If the node has a public IPv4 for
+cheap egress, that address is an identifier in someone else’s logs, not a
+listener.
+
+---
+
+## 3. Data flows
+
+Three flows exist. They do not share a listener.
+
+### 3.1 User request (HTTPS)
+
+This is the only path a customer packet takes.
+
+```
+browser
   │  TLS 1.3, SNI = app.example.com
   ▼
-Cloudflare anycast (WAF, Bot Fight, HTTP/2 or HTTP/3)
-  │  Access policy (IdP / OTP / mTLS / device posture)
-  │  origin = named tunnel UUID, not an IP
+Cloudflare anycast
+  │  WAF, Bot Fight, HTTP/2 or HTTP/3
+  │  Zero Trust Access: IdP / OTP / device posture
+  │  origin = named tunnel UUID  (not an IP)
   ▼
-cloudflared  (connects OUTBOUND to Cloudflare on TCP/443 or QUIC/7844)
-  │  connects to the local Ingress on the pod network or 127.0.0.1
+cloudflared   ── outbound TCP/443 or QUIC/443 ──► Cloudflare
+  │  in-cluster: http://edge-echo.edge.svc.cluster.local:8080
+  │  compose:    http://edge-echo:8080
   ▼
-Traefik Ingress (k3s) / Caddy (compose)
-  │  NetworkPolicy: ingress only from the cloudflared pod / compose net
+NetworkPolicy / compose bridge  (only cloudflared may connect)
   ▼
-edge-echo (non-root, :8080)
+edge-echo  UID 65532, :8080, read-only rootfs
 ```
 
-The origin never presents a public A/AAAA record that points at the node.
-DNS for `app.example.com` is a CNAME to `*.cfargotunnel.com`. If someone
-scans the node’s public IPv4, they get **no open ports**.
+Properties that follow from this path:
 
-### Operator session (SSH / kubectl / Grafana)
+- The kernel on the node never accepts a SYN from a user. Return traffic
+  for the tunnel is stateful, matching an outbound flow cloudflared opened.
+- TLS to the user is terminated at Cloudflare. Inside the cluster we speak
+  HTTP on the pod network. Minting a public origin certificate on the node
+  is unnecessary.
+- Access is evaluated *before* the request is sent down the tunnel. A
+  revoked user produces a Cloudflare identity page, not an origin 401.
+
+Failure modes that look like “the app is down” but are not:
+
+| Symptom | Hop |
+| --- | --- |
+| 1033 | cloudflared process or token |
+| Access loop | clock skew (NTP egress) or cookie domain |
+| 524 / GET works, POST hangs | MTU / PMTUD — see [postmortem-example.md](postmortem-example.md) |
+
+### 3.2 Operator session (SSH, kubectl, Grafana)
 
 ```
 operator laptop (tailscaled)
-  │  WireGuard UDP, inner MTU 1280
+  │  WireGuard, inner MTU 1280
   ▼
-Tailscale coordination + DERP (if NAT traversal fails)
-  │  ACL: group:ops → tag:node:22, :6443, :3000, :9090
+Tailscale coordination  (DERP if NAT traversal fails)
+  │  ACL: group:ops → tag:node :22 :6443 :3000 :9090
   ▼
-node tailscale0 (100.x.y.z)
-  │  sshd ListenAddress = 100.x.y.z
-  │  kube-apiserver bind = 127.0.0.1 + tailscale0 (not 0.0.0.0)
+node tailscale0  100.x.y.z
+  │  sshd ListenAddress = 100.x.y.z  (+ 127.0.0.1)
+  │  kube-apiserver advertised on the Tailscale IP
   ▼
-host namespaces / kubectl via local kubeconfig
+host namespaces / local kubeconfig
 ```
 
-SSH keys still exist. They are a second factor on top of Tailscale identity
-and ACL, not the perimeter.
+SSH keys still exist. They are a second factor on top of Tailscale identity,
+not the perimeter. A stolen key without a live tailnet membership does not
+reach `sshd`.
 
-### CI deploy
+Grafana and Prometheus are not published on Cloudflare unless the customer
+asks. The default is Tailscale-only. Publishing Grafana requires an Access
+policy of its own; it does not inherit the product policy.
 
-GitHub Actions joins the tailnet with an OAuth client tagged `tag:ci`.
-ACL allows `tag:ci` → `tag:node:22` and the container registry, nothing else.
-The runner never receives a long-lived SSH private key for a user in
-`group:ops`.
+### 3.3 CI deploy
 
-## 3. CIDR plan
+```
+GitHub Actions runner
+  │  Tailscale GitHub Action, OAuth client, tag:ci, ephemeral
+  ▼
+ACL: tag:ci → tag:node:22   (nothing else)
+  ▼
+tailscale SSH to the node
+  │  kubectl apply -f k3s/manifests/
+  ▼
+rollout status on deploy/edge-echo
+  ▼
+scripts/zero-trust-verify.sh
+  ▼
+tailscale logout   (runner leaves the tailnet)
+```
 
-| Name | CIDR | Routed? | Notes |
-| --- | --- | --- | --- |
-| VPC | `10.42.0.0/16` | yes, AWS | Avoids the `10.0.0.0/16` cliché and most office LANs |
-| Public AZ-a | `10.42.0.0/24` | IGW | Default route for egress; no inbound SG |
-| Public AZ-b | `10.42.1.0/24` | IGW | Spare for a NAT instance later |
-| Private AZ-a | `10.42.10.0/24` | local + egress | k3s node ENI lives here when `assign_public_ip = false` |
-| Private AZ-b | `10.42.11.0/24` | local + egress | Second node |
-| Pod | `10.43.0.0/16` | k3s only | Must not overlap VPC, or kube-proxy hairpin bugs appear |
-| Service | `10.44.0.0/16` | k3s only | ClusterIP. Do not advertise to the VPC |
-| Tailscale | `100.64.0.0/10` | overlay | CGNAT (RFC 6598). **Never** allocate this in the VPC |
-| Cloudflare WARP | `100.96.0.0/12` | overlay | Disjoint from Tailscale; keep it that way |
-| Cloudflare Tunnel virtual | `198.18.0.0/15` (when WARP/private net enabled) | overlay | Benchmark range; do not route it in the VPC |
+The runner never holds a long-lived SSH private key for a human in
+`group:ops`. AWS, when used, is GitHub OIDC → IAM role, not
+`AWS_SECRET_ACCESS_KEY`.
 
-Host addresses on a single-node install:
+### 3.4 What is *not* a data flow
 
-| Interface | Address | Purpose |
+- There is no hairpin through a public Network Load Balancer.
+- There is no MetalLB announcement of a public IP.
+- There is no `hostPort: 443` on `0.0.0.0`.
+- There is no bastion. A bastion is a public listener with extra steps.
+
+---
+
+## 4. Security boundaries
+
+Defense in depth is four layers that fail independently. Compromising
+Cloudflare Access does not open SSH. Compromising a pod does not grant
+VPC routing. Compromising the host SG story does not grant Kubernetes
+identity.
+
+```mermaid
+flowchart TB
+  B1["1. L3/L4 — SG + NACL + ufw<br/>deny-all inbound TCP from 0.0.0.0/0"]
+  B2["2. Overlay — Tailscale ACL<br/>tag:ops / tag:ci / tag:node"]
+  B3["3. Identity — Cloudflare Zero Trust Access<br/>IdP + MFA on every user hostname"]
+  B4["4. In-cluster — NetworkPolicy default-deny<br/>+ non-root, read-only, dropped caps"]
+  B1 --- B2 --- B3 --- B4
+```
+
+### 4.1 Boundary 1 — host and VPC
+
+**No public IP required.** When `assign_public_ip = false` and a NAT path
+exists, the ENI has only `10.42.10.0/24`. When a public IPv4 is assigned
+for cheap egress, the security group still has **no inbound TCP**. Unsolicited
+SYNs die at the hypervisor. The kernel never sees them.
+
+NACL on public subnets additionally **denies** inbound 22/80/443/3389 from
+`0.0.0.0/0`. A later mistaken SG rule still fails closed at the NACL.
+
+ICMP dest-unreach (type 3) and time-exceeded (type 11) are allowed. Path
+MTU discovery is part of TCP. Dropping all ICMP is how GET stays green
+while POST hangs. Documented in the postmortem.
+
+On a VPS, `ufw default deny incoming` plus `allow in on tailscale0` is the
+same boundary without AWS objects.
+
+sshd is bound to the Tailscale IP and loopback (`scripts/bind-ssh-tailscale.sh`).
+Even a hole punched in ufw on `:22` does not expose SSH on the WAN address.
+
+### 4.2 Boundary 2 — Tailscale ACL (network segmentation at identity)
+
+`tailscale/acl.hujson` is the operator perimeter.
+
+| Source | Destination | Ports |
 | --- | --- | --- |
-| `eth0` (VPC) | `10.42.10.10/24` (private path) or a public Elastic IP (cost path) | Default route |
-| `tailscale0` | `100.x.y.z/32` | Operator + CI |
-| `lo` | `127.0.0.1` | cloudflared → Ingress, kube-apiserver, node-exporter |
-| `cni0` / flannel | `10.43.0.1/16` | Pods |
-| kube-ipvs0 / ClusterIP | `10.44.0.0/16` | Services |
+| `group:ops` | `tag:node` | 22, 6443, 3000, 9090, 3100, 8080 |
+| `tag:ci` | `tag:node` | 22 only |
+| `tag:node` | `tag:node` | all (future HA) |
 
-`10.42.10.10` is reserved in Terraform (`private_fixed_ip`) so runbooks can
-name it. DHCP is fine; a stable address is kinder to humans.
+CI cannot open Grafana. A contractor laptop not in `group:ops` cannot open
+SSH. Tags are minted by an auth key; they are not self-asserted by the
+node after join.
 
-## 4. Security groups and NACLs
+Subnet routes for `10.42.0.0/16` are **off** by default. Advertising the
+VPC to every laptop turns every operator device into a path into RFC1918.
+Enable that only when a private data store (RDS, etc.) must be reached,
+and then only for `group:ops`.
 
-Security groups are stateful. NACLs are stateless. We use both, for
-different jobs.
+### 4.3 Boundary 3 — Cloudflare Zero Trust Access
 
-### Node security group (`sg-node`)
+Tunnel makes the origin private. Access decides which humans may use it.
+They are independent. Running only the tunnel still leaves a public
+Cloudflare hostname that anyone can hit; Access closes that.
 
-Ingress: **empty.**
+| Hostname | Policy |
+| --- | --- |
+| `app.example.com` | Allow `@customer.com` + MFA, 8 h session |
+| `grafana.example.com` | Allow `group:ops` only, or do not publish |
+| Prometheus / Loki | Do not publish. Tailscale only |
 
-That is not a placeholder. There is no `22`, no `80`, no `443`, no
-`41641`. Tailscale and Cloudflare are outbound-initiated. Return traffic
-is allowed by SG state, not by an inbound rule.
+SSL/TLS mode is Full (strict) toward Cloudflare’s own tunnel mTLS.
+Minimum TLS 1.2, prefer 1.3. Always Use HTTPS. Origin certificates on
+the node are optional and usually omitted.
 
-Egress (explicit, not `-1` to `0.0.0.0/0` in the strict profile):
+### 4.4 Boundary 4 — in-cluster network segmentation
 
-| Port | Proto | Destination | Why |
-| --- | --- | --- | --- |
-| 443 | TCP | `0.0.0.0/0` | Cloudflare Tunnel, container registry, GitHub, IdP |
-| 53 | UDP/TCP | VPC resolver + `0.0.0.0/0` | DNS. Pin to VPC resolver (`.2`) if you can |
-| 123 | UDP | `0.0.0.0/0` | NTP. Chrony will not survive a blocked 123 |
-| 41641 | UDP | `0.0.0.0/0` | Tailscale direct path |
-| 3478 | UDP | `0.0.0.0/0` | Tailscale STUN |
-| 443 | UDP | `0.0.0.0/0` | HTTP/3 + Tailscale DERP-over-HTTPS, Cloudflare QUIC |
-| 80 | TCP | `0.0.0.0/0` | ACME HTTP-01 only if you terminate locally (we do not); keep for `apt` mirrors that still redirect |
-| ICMP | dest-unreach, time-exceeded | `0.0.0.0/0` | PMTUD |
+Namespace `edge` is default-deny for ingress and egress. Holes:
 
-The default Terraform env ships the **strict egress** list above. A
-`egress_unrestricted = true` variable exists for the first four hours of a
-bring-up, when you have not yet enumerated apt, GHCR, and DERP. Turn it
-off before the client demo.
+- DNS to `kube-system` / `10.44.0.0/16`
+- Ingress to `app=edge-echo` from `app=cloudflared` in `cloudflare-tunnel`
+- Ingress to `app=edge-echo` from `monitoring` (scrape)
+- Egress from cloudflared to the app, to DNS, and to `0.0.0.0/0:443`
+  except RFC1918 and Tailscale CGNAT
 
-### NACL on public subnets
+The app has **no** arbitrary internet egress unless a later NetworkPolicy
+says so. “Allow all egress to make the demo work” is how a compromised
+pod becomes a proxy.
 
-Stateless, so ephemeral ports must be allowed inbound for return traffic:
+Workload constraints (independent of the network):
 
-- Inbound: ephemeral `1024-65535` from `0.0.0.0/0`, plus ICMP dest-unreach.
-- Inbound: **deny** `22`, `80`, `443`, `3389` from `0.0.0.0/0` at a lower
-  rule number so a mistaken SG rule still fails closed.
-- Outbound: `80`, `443`, `53`, `123`, `41641`, `3478`, ephemeral.
+- UID 65532, `runAsNonRoot`, `readOnlyRootFilesystem`
+- capabilities dropped `ALL`, no `NET_RAW`
+- `seccompProfile: RuntimeDefault`
+- PodSecurity `restricted` on `edge`
+- resource requests and limits set
+- Service type `ClusterIP` only — never NodePort, never LoadBalancer
 
-NACLs are a seatbelt. They are not a substitute for the empty SG.
+Compose mirrors this: `read_only`, `cap_drop: ALL`, `user: 65532`,
+`pids_limit`, `mem_limit`, ports as `127.0.0.1:8080:8080`.
 
-## 5. NAT behaviour
+---
 
-Three valid egress designs. Pick one; do not mix them on the same node.
+## 5. Why this design
 
-### A. Public IP, deny-all ingress (default, cheapest)
+### 5.1 Why Cloudflare Tunnel instead of a public load balancer
 
-The ENI has a public IPv4. The route table of the subnet points at the
-IGW. The SG has no inbound rules. Outbound SYN packets are rewritten with
-the public IP by the IGW; return packets match SG state and are accepted.
+A load balancer is an inbound listener with a bill. A named tunnel is an
+outbound client with the same user-visible HTTPS.
 
-This is **source NAT at the IGW**, not a NAT Gateway. There is no
-per-GB NAT charge. The node is still not reachable inbound.
+Consequences:
 
-Caveat: the public IP appears in Cloudflare and registry logs as the
-origin. That is fine. Do not put that IP in DNS.
+- **No public IP required** on compute. The LB’s job (stable name, TLS,
+  DDoS) moves to Cloudflare anycast.
+- Origin IP is not in DNS, so it is not in threat-intel “open 443” sets.
+- Adding a second connector is another `cloudflared` replica, not another
+  listener and not another Elastic IP.
 
-### B. Private IP + NAT Gateway (strictest, most expensive)
+We do not put an ALB *and* a tunnel in front of the same origin. That
+reintroduces inbound ports and a second bill.
 
-Subnet route `0.0.0.0/0 → nat-…`. The node has no public IP. You pay
-hourly + per-GB. Use this when a customer’s policy forbids public
-addresses on compute, even with empty SGs.
+### 5.2 Why Tailscale instead of a bastion or a customer VPN appliance
 
-### C. Private IP + NAT instance (middle)
+A bastion is `:22` on a public IP plus extra SSH config. WireGuard “from
+scratch” is a PKI and a runbook. Tailscale is WireGuard with coordination,
+ACL tags, and an ephemeral CI identity.
 
-A small `t4g.nano` in `10.42.0.0/24` with `net.ipv4.ip_forward=1` and
-`MASQUERADE`. Source/dest check disabled. One-tenth the cost of a NAT
-Gateway, and you own the failure domain. Documented in Terraform comments;
-not applied by default because it is another box to patch.
+Operators already have laptops. Putting `tailscaled` on the node and on
+the laptop, then writing three grants in `acl.hujson`, is the entire
+operator network. DERP exists so a hotel NAT still works; UDP/41641
+egress is opened so peers go direct when they can.
 
-VPC endpoints for S3 and ECR are always created. Image pulls should not
-traverse NAT.
+### 5.3 Why k3s *and* Docker
 
-## 6. MTU and MSS
+Small teams do not all live on AWS, and they do not all want a control
+plane on day one.
 
-| Segment | MTU | MSS (IPv4 TCP) |
+| | Docker Compose | k3s |
 | --- | --- | --- |
-| VPC path (we pin) | 1500 | 1460 |
-| Internet to Cloudflare | 1500 typical | 1460 |
-| Cloudflare Tunnel over HTTP/2 | inner ~1420 | clamp 1380 |
-| Cloudflare Tunnel over QUIC | inner ~1280–1350 | clamp 1240 |
-| Tailscale WireGuard | 1280 default | 1240 |
-| k3s flannel VXLAN (if used) | 1450 | 1410 |
+| Unit of deploy | compose file | manifests |
+| Network segmentation | bridge `10.45.0.0/24` + bind 127.0.0.1 | NetworkPolicy + ClusterIP |
+| Fits | one VPS, one app | one VPS or AWS node, room to add a second |
+| Same image | yes | yes |
+| Same tunnel | yes | yes |
 
-k3s in this repo is installed with `--flannel-backend=wireguard-native`
-when the host has kernel WireGuard, otherwise `vxlan`. Either way we set:
+The CIDR plan already has a second private subnet so a second k3s node
+is a scale-up, not a redesign.
 
-```
---kube-proxy-arg=iptables-min-sync-period=1s
-# and on the node:
-ip link set eth0 mtu 1500
-```
+### 5.4 Why empty inbound rather than “allow 443 from Cloudflare IPs”
 
-**Never enable jumbo frames (9001) on a node that also runs an overlay.**
-The first 1500-byte inner packet that cannot fragment (DF bit is set on
-almost all TCP) will black-hole. That incident is written up in
-[postmortem-example.md](postmortem-example.md).
+Allowlisting Cloudflare IPv4 ranges on `:443` still leaves a public
+listener, still requires keeping the list current, and still fails if a
+process binds `:22` by accident. Empty inbound plus outbound-only tunnel
+removes the class of error. Cloudflare’s published IP list is a useful
+*WAF* input, not an origin SG rule.
 
-`scripts/mtu-path-check.sh` sends ICMP with DF set at 1280, 1400, 1472,
-1500 and reports the first failure. Run it from the node toward
-`1.1.1.1` and from a laptop toward the Tailscale IP.
+### 5.5 Why NAT Gateway is off by default
 
-## 7. k3s networking
+NAT Gateway is ~$32/month plus per-GB, before the instance. A public IPv4
+with deny-all ingress is the same inbound posture with IGW source NAT.
+A private ENI with **no public IP** is available: set
+`assign_public_ip = false` and `enable_nat_gateway = true` (or a NAT
+instance). That is a policy choice, quoted in the SOW. It is not the
+silent default.
 
-```
-k3s install flags we care about:
+VPC endpoints for S3 stay on either path so image layers and flow logs
+do not traverse NAT.
 
-  --disable=traefik          # we re-apply a pinned Traefik with our values
-                             # (actually we KEEP traefik and pin via HelmChartConfig)
-  --flannel-backend=wireguard-native
-  --cluster-cidr=10.43.0.0/16
-  --service-cidr=10.44.0.0/16
-  --tls-san=${TAILSCALE_IP}
-  --tls-san=127.0.0.1
-  --advertise-address=${TAILSCALE_IP}
-  --kube-apiserver-arg=bind-address=0.0.0.0
-        # bind all, but SG + host firewall drop non-tailscale
-  --disable=servicelb          # no LoadBalancer that would want a public IP
-  --disable=metrics-server     # optional; we scrape with Prometheus
-```
+### 5.6 Why MTU is pinned at 1500
 
-Ingress:
+Overlays own the inner MTU.
 
-- Traefik listens on `127.0.0.1:80` and `127.0.0.1:443` (hostNetwork or a
-  hostPort bound to loopback via `spec.template.spec.hostNetwork` +
-  firewall). cloudflared `ingress` points at `https://127.0.0.1:443` or
-  the in-cluster Service DNS.
-- We prefer in-cluster Service DNS (`http://edge-echo.edge.svc:8080`) so
-  the tunnel sidecar and the app can be scheduled independently.
-
-NetworkPolicy (namespace `edge`): default-deny ingress and egress, then:
-
-- allow ingress to `app=edge-echo` from `app=cloudflared`
-- allow egress from `app=cloudflared` to `443/tcp` and DNS
-- allow egress from `app=edge-echo` to in-namespace + DNS (no arbitrary
-  internet unless the app needs it)
-
-## 8. Identity
-
-| Actor | Proves identity with | Authorized by |
+| Segment | MTU | Notes |
 | --- | --- | --- |
-| End user | Cloudflare Access (Google / GitHub / OTP) | Access policy on the hostname |
-| Operator | Tailscale node + GitHub / Google on the tailnet | `group:ops` in `tailscale/acl.hujson` |
-| CI | Tailscale OAuth client | `tag:ci` |
-| Node | Tailscale auth key (ephemeral, tagged `tag:node`) | ACL destination |
-| Terraform | GitHub OIDC → AWS IAM role | `sts:AssumeRoleWithWebIdentity` |
+| VPC / VPS Ethernet | **1500** pinned | Jumbo 9001 + overlay = black hole |
+| Cloudflare Tunnel QUIC | inner ~1280–1350 | Outer UDP headers |
+| Cloudflare Tunnel HTTP/2 | inner ~1420 | Fallback after an MTU incident |
+| Tailscale WireGuard | 1280 | MSS clamped |
+| k3s flannel VXLAN | 1450 | `wireguard-native` preferred |
 
-There is no bastion. A bastion is a public listener with extra steps.
+TCP sets DF. If ICMP dest-unreach is dropped, PMTUD cannot complete, and
+an 8 KB POST hangs while `/healthz` stays green. That incident is written
+up in [postmortem-example.md](postmortem-example.md).
+`scripts/mtu-path-check.sh` measures 1200 → 1472 with DF set.
 
-## 9. Failure domains
+---
 
-| Failure | User impact | Operator impact | Recovery |
+## 6. CIDR plan (network segmentation on paper)
+
+Ranges are disjoint on purpose. Overlap is how ACLs lie and how
+kube-proxy hairpins.
+
+| Name | CIDR | Routed where | Why this number |
 | --- | --- | --- | --- |
-| Cloudflare regional outage | Users in that region fail over with anycast | none | wait / status.cloudflare.com |
-| cloudflared process down | Users 1033 / 502 | Tailscale still works | systemd restart, k3s reschedule |
-| Tailscale coordination down | none (users on CF) | DERP fallback, slower SSH | wait; SSH will limp on DERP |
-| Node kernel panic | everything | everything | cloud-init + k3s install is idempotent; RPO = PVC / sqlite snapshots |
-| NAT Gateway (if used) | image pulls fail, tunnel may still run until conn dies | same | this is why we default off NAT GW |
-| Wrong MTU | POST bodies hang, GET works | SSH works, `scp` of large files hangs | `scripts/mtu-path-check.sh` |
+| VPC | `10.42.0.0/16` | AWS | Avoids default `10.0.0.0/16` and most office LANs |
+| Public AZ-a | `10.42.0.0/24` | IGW | Egress / NAT instance only |
+| Public AZ-b | `10.42.1.0/24` | IGW | Spare |
+| Private AZ-a | `10.42.10.0/24` | local + egress | k3s node |
+| Private AZ-b | `10.42.11.0/24` | local + egress | second node |
+| Pod | `10.43.0.0/16` | k3s only | Must not overlap VPC |
+| Service | `10.44.0.0/16` | k3s only | ClusterIP, never advertised to the VPC |
+| Compose bridge | `10.45.0.0/24` | docker0 | Disjoint from the above |
+| Tailscale | `100.64.0.0/10` | overlay | RFC 6598 CGNAT. **Never** a VPC CIDR |
+| Cloudflare WARP | `100.96.0.0/12` | overlay | Keep disjoint if WARP is enabled |
 
-Single-node k3s is a **deliberate** RPO/RTO choice for teams under 20
-people. etcd/sqlite lives on an encrypted gp3 volume with daily snapshots
-(`scripts` + AWS DLM in Terraform). Adding a second node is a CIDR and
-install-flag change, not a new architecture.
+k3s install pins `--cluster-cidr=10.43.0.0/16 --service-cidr=10.44.0.0/16`
+and `--advertise-address=${TAILSCALE_IP}` so the API certificate is useful
+on the mesh and useless on the WAN.
 
-## 10. What we explicitly do not run
+---
 
-- Public Network Load Balancer in front of k3s
-- MetalLB announcing a public IP
-- `hostPort: 443` on `0.0.0.0`
-- WireGuard “homegrown” in addition to Tailscale (one overlay)
-- Calico + flannel at the same time
-- IPv6 dual-stack until the Cloudflare and Tailscale v6 paths are measured
-  (v6 is on the roadmap; silent dual-stack is how you leak an AAAA)
+## 7. Egress (the only direction the node initiates)
 
-## 11. Related docs
+Strict security-group egress (Terraform `egress_unrestricted = false`):
 
-- [finops.md](finops.md) — cost of each NAT choice
-- [postmortem-example.md](postmortem-example.md) — MTU black hole
-- [../cloudflare/tunnel-and-access.md](../cloudflare/tunnel-and-access.md)
-- [../tailscale/acl.hujson](../tailscale/acl.hujson)
+| Port | Proto | Reason |
+| --- | --- | --- |
+| 443/tcp | TCP | Tunnel, GHCR, GitHub, IdP, DERP-over-HTTPS |
+| 443/udp | UDP | QUIC (tunnel), HTTP/3 |
+| 80/tcp | TCP | apt mirrors that still 301 |
+| 53/udp+tcp | | DNS |
+| 123/udp | | NTP — TLS and Tailscale both suffer if the clock drifts |
+| 41641/udp | | Tailscale direct |
+| 3478/udp | | Tailscale STUN |
+| ICMP | | PMTUD |
+
+`egress_unrestricted = true` exists for the first hours of a bring-up.
+It is a handover blocker. `scripts/cost-snapshot.sh` also fails the job
+if a SG later grows `0.0.0.0/0` inbound TCP — that finding is security
+and cost at once (it usually means an unused ALB).
+
+---
+
+## 8. Failure domains
+
+| Failure | Users | Operators | Recovery |
+| --- | --- | --- | --- |
+| Cloudflare regional outage | anycast shifts | none | wait |
+| cloudflared down | 1033 / 502 | Tailscale still works | systemd / replica |
+| Tailscale coordination down | none | DERP fallback, slower SSH | wait |
+| Node kernel | both | both | cloud-init + k3s install is idempotent; DLM snapshots on AWS |
+| NAT Gateway (if enabled) | pulls fail; tunnel dies when the flow expires | same | why it is off by default |
+| Wrong MTU | POST hangs, GET works | SSH works | pin 1500, allow ICMP type 3 |
+
+Single-node k3s is a deliberate RPO/RTO choice for a team under ~20
+people. HA is a second node in `10.42.11.0/24`, not a new architecture.
+
+---
+
+## 9. Related files
+
+| File | Role |
+| --- | --- |
+| [finops.md](finops.md) | Cost of each NAT / public-IP choice |
+| [postmortem-example.md](postmortem-example.md) | MTU black hole, 47 minutes |
+| [../cloudflare/tunnel-and-access.md](../cloudflare/tunnel-and-access.md) | Named tunnel, Access, rotation |
+| [../tailscale/acl.hujson](../tailscale/acl.hujson) | Operator / CI grants |
+| [../terraform/modules/security/main.tf](../terraform/modules/security/main.tf) | Empty ingress, strict egress |
+| [../k3s/manifests/10-network-policy.yaml](../k3s/manifests/10-network-policy.yaml) | Default-deny + holes |
+| [../scripts/zero-trust-verify.sh](../scripts/zero-trust-verify.sh) | Handover check |
+
+---
+
+Cloud Native Network Engineer | Zero Trust · Terraform · k3s · Cloudflare
