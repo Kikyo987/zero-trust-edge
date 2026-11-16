@@ -4,17 +4,28 @@ No video host. This page is the demo: packet path, then commands you can run.
 
 ## 1. Packet path (~30 s)
 
+Two planes. The tunnel does not enter Tailscale, and Tailscale is not how a user reaches the app.
+
 ```mermaid
 flowchart LR
-  A[Internet] --> B[Cloudflare Zero Trust]
-  B --> C[Cloudflare Tunnel]
-  C --> D[Tailscale private network]
-  D --> E[k3s / Docker]
+  subgraph userPlane [User plane]
+    U[Internet users] --> CF[Cloudflare Access and WAF]
+    CF --> CFD[cloudflared]
+    CFD --> SVC["Service network<br/>edge-echo.edge.svc:8080"]
+    SVC --> APP[edge-echo]
+  end
+  subgraph opsPlane [Operator plane]
+    OPS[group:ops] --> ACL[Tailscale ACL]
+    CI[tag:ci] --> ACL
+    ACL --> NODE["node SSH :22"]
+  end
 ```
 
-- Users never SYN the origin. Cloudflare Access is the identity check; **Cloudflare Tunnel** is outbound-only.
-- Operators never use public `:22`. **Tailscale** ACL tags (`group:ops`, `tag:ci`) are the door.
+- Users never SYN the origin. Cloudflare Access is the identity check. **cloudflared** dials Cloudflare, then the app on the cluster Service or the compose DNS name.
+- Operators and CI never use public `:22`. **Tailscale** ACL tags (`group:ops`, `tag:ci`) are a second door, onto `100.x` only.
 - The node has **no public inbound ports**. Traefik / Compose bind ClusterIP or `127.0.0.1`.
+
+Drawing with CIDRs: [diagrams/dual-plane.svg](diagrams/dual-plane.svg).
 
 ## 2. Prove it locally (~90 s)
 

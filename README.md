@@ -22,29 +22,32 @@ Packet-level rationale, CIDR plan, MTU, and NAT behaviour: **[docs/architecture.
 
 ## Architecture
 
-Internet to origin, one line (GitHub renders this left-to-right):
+Two planes share a node and nothing else. User packets do not cross Tailscale. Operator packets do not cross the tunnel. `cloudflared` reaches the app on the Kubernetes Service network (`http://edge-echo.edge.svc.cluster.local:8080` in `cloudflare/config.yml`) or, under Compose, `http://edge-echo:8080`. It does not route via `tailscale0`.
 
 ```mermaid
 flowchart LR
-  A[Internet] --> B[Cloudflare Zero Trust]
-  B --> C[Cloudflare Tunnel]
-  C --> D[Tailscale private network]
-  D --> E[k3s / Docker]
+  subgraph userPlane [User plane]
+    U[Internet users] --> CF[Cloudflare Access and WAF]
+    CF --> CFD[cloudflared]
+    CFD --> SVC["Service network<br/>edge-echo.edge.svc:8080"]
+    SVC --> APP[edge-echo]
+  end
+  subgraph opsPlane [Operator plane]
+    OPS[group:ops] --> ACL[Tailscale ACL]
+    CI[tag:ci] --> ACL
+    ACL --> NODE["node SSH :22"]
+    ACL --> MON["Grafana<br/>ops only"]
+  end
 ```
 
-Users and operators use different doors. Neither door is a public port on the node:
+Same picture, with CIDRs: [docs/diagrams/dual-plane.svg](docs/diagrams/dual-plane.svg).
 
-```mermaid
-flowchart TB
-  Users[Users] --> Access[Cloudflare Access]
-  Access --> WAF[WAF and TLS]
-  WAF --> Named[Named Tunnel]
-  Named --> CFD[cloudflared]
-  CFD --> App[k3s / Docker]
+![Dual-plane edge: user traffic through Cloudflare to the Service network, operator traffic through Tailscale](docs/evidence/architecture-dual-plane.png)
 
-  Ops[Operators and CI] --> TS[Tailscale ACL]
-  TS --> App
-```
+| Plane | Who | Path | Not on this path |
+| --- | --- | --- | --- |
+| User | People using the product | Cloudflare Access → named tunnel → `cloudflared` → ClusterIP / compose DNS → `edge-echo` | Tailscale, public `:443` on the node |
+| Operator | `group:ops`, `tag:ci` | Tailscale ACL → `100.x` (`:22`, and for ops also kubectl and Grafana) | The tunnel, the app's public hostname |
 
 DNS for `app.example.com` is a CNAME to `*.cfargotunnel.com`. Scanning the node — if it even has a public address — returns **no open ports**. SSH, kube-apiserver, Grafana, and Prometheus bind to `100.64.0.0/10` and loopback.
 
@@ -61,7 +64,7 @@ DNS for `app.example.com` is a CNAME to `*.cfargotunnel.com`. Scanning the node 
 | IaC | `terraform/` | Modular VPC / SG / compute, remote state, empty ingress on the node SG |
 | CI/CD | `.github/workflows/` | Build + Trivy; deploy over Tailscale (`tag:ci` → `tag:node`) |
 | Observability | `monitoring/` | Prometheus, Grafana, Loki, Alloy — private only |
-| Ops | `docs/`, `scripts/` | FinOps model, MTU postmortem, `zero-trust-verify.sh` |
+| Ops | `docs/`, `scripts/`, `security-tests/` | FinOps model, simulated MTU lab, `zero-trust-verify.sh`, security-test report |
 
 ---
 
@@ -215,6 +218,16 @@ Then SSM or, once Tailscale user-data has joined, SSH to `100.x` and continue fr
 
 ## Verify before handover
 
+`scripts/zero-trust-verify.sh` checks the host you are sitting on (listeners, compose publish addresses, non-root). It does not prove Access, the Tailscale ACL, or NetworkPolicy. Those are `security-tests/`:
+
+```bash
+sudo ./security-tests/run.sh --lab
+# writes security-tests/reports/latest.md
+# LAB evidence. It does not claim a production nmap result.
+```
+
+A live node, with the owner's Cloudflare and Tailscale accounts, is `sudo ./security-tests/run.sh --production`. Missing account variables are SKIP, not PASS.
+
 ```bash
 sudo ./scripts/zero-trust-verify.sh
 # FAIL if 0.0.0.0:{22,80,443} is listening
@@ -240,7 +253,9 @@ sudo ./scripts/zero-trust-verify.sh
 | [Architecture](docs/architecture.md) | Data flow, security boundaries, why this design |
 | [ADR 0001](docs/adr/0001-zero-trust-edge.md) | Why Tunnel + Tailscale, not a VPN or public LB |
 | [FinOps](docs/finops.md) | Monthly model, NAT Gateway avoidance |
-| [Postmortem example](docs/postmortem-example.md) | Tunnel MTU black hole |
+| [Postmortem example](docs/postmortem-example.md) | Simulated MTU black hole, plus a local lab reproduction |
+| [Security tests](security-tests/README.md) | PASS/FAIL report for the seven isolation checks |
+| [Dual-plane diagram](docs/diagrams/dual-plane.svg) | User plane and operator plane, no shared hop |
 | [Cloudflare tunnel + Access](cloudflare/tunnel-and-access.md) | Zero-inbound tunnel, GitHub/Google MFA, Tailscale ACL vs VPN |
 | [CONTRIBUTING](CONTRIBUTING.md) | Local run, commits |
 | [SECURITY](SECURITY.md) | Reporting and baseline |

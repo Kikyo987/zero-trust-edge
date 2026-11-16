@@ -1,0 +1,30 @@
+# Lab security checks and the MTU black-hole reproduction.
+# These do not call Cloudflare, Tailscale, or a public VPS.
+name: security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 iptables nmap tcpdump python3-yaml gcc libc6-dev curl
+      - name: deploy outcome classifier
+        run: ./scripts/deploy-outcome.sh --self-test
+      - name: probe pod manifest
+        run: python3 scripts/render-probe-pod.py --self-test
+      - name: security lab
+        run: sudo ./security-tests/run.sh --lab
+      - name: mtu lab
+        run: sudo ./security-tests/lab/mtu-blackhole.sh
