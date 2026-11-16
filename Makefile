@@ -55,6 +55,14 @@ verify-compose: ## Laptop/compose: prove 127.0.0.1-only publishes
 mtu: ## Path MTU probe
 	./scripts/mtu-path-check.sh
 
+.PHONY: mtu-lab
+mtu-lab: ## Lab PMTUD black hole (network namespaces, not a production outage)
+	./security-tests/lab/mtu-blackhole.sh
+
+.PHONY: security-test
+security-test: ## Lab security report (not a production scan)
+	./security-tests/run.sh --lab
+
 .PHONY: cost
 cost: ## AWS idle-resource snapshot (needs AWS creds)
 	./scripts/cost-snapshot.sh

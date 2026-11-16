@@ -10,7 +10,7 @@ k3s/
   install.sh
   manifests/
     00-namespace.yaml      edge, cloudflare-tunnel, monitoring + PSA
-    10-network-policy.yaml default-deny + DNS + cloudflared → app
+    10-network-policy.yaml default-deny + DNS + cloudflared → app + labeled probes
     20-deployment.yaml     edge-echo, non-root, probes, limits
     21-service.yaml        ClusterIP :8080
     30-ingress.yaml        Traefik Ingress + HelmChartConfig (no host bind)

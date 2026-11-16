@@ -1,0 +1,97 @@
+lab reproduction: PMTUD black hole
+host: cursor kernel: 6.12.113+
+class: LAB. Not a production incident.
+utc: 2026-11-16T06:59:47Z
+
+
+== link MTUs ==
+$ ip netns exec mtu-c ip link show c-v
+49: c-v@if48: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default qlen 1000
+    link/ether 06:2b:46:16:e9:f0 brd ff:ff:ff:ff:ff:ff link-netns mtu-r
+$ ip netns exec mtu-r ip link show c-r
+48: c-r@if49: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default qlen 1000
+    link/ether 8a:b9:d1:12:fe:68 brd ff:ff:ff:ff:ff:ff link-netns mtu-c
+$ ip netns exec mtu-r ip link show s-r
+50: s-r@if51: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1280 qdisc noqueue state UP mode DEFAULT group default qlen 1000
+    link/ether 76:10:da:8a:51:d7 brd ff:ff:ff:ff:ff:ff link-netns mtu-s
+$ ip netns exec mtu-s ip link show s-v
+51: s-v@if50: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default qlen 1000
+    link/ether 22:6d:41:aa:d9:17 brd ff:ff:ff:ff:ff:ff link-netns mtu-r
+
+== black hole: drop ICMP fragmentation-needed on the router ==
+$ ip netns exec mtu-r iptables -S
+-P INPUT ACCEPT
+-P FORWARD ACCEPT
+-P OUTPUT ACCEPT
+-A FORWARD -p icmp -m icmp --icmp-type 3/4 -j DROP
+-A OUTPUT -p icmp -m icmp --icmp-type 3/4 -j DROP
+
+== DF pings while ICMP is dropped ==
+(1200+28 fits in 1280; 1400+28 does not, and the sender never hears why)
+$ ip netns exec mtu-c ping -M do -n -c 2 -W 2 -s 1200 10.88.1.2
+PING 10.88.1.2 (10.88.1.2) 1200(1228) bytes of data.
+1208 bytes from 10.88.1.2: icmp_seq=1 ttl=126 time=0.074 ms
+1208 bytes from 10.88.1.2: icmp_seq=2 ttl=126 time=0.037 ms
+
+--- 10.88.1.2 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1022ms
+rtt min/avg/max/mdev = 0.037/0.055/0.074/0.018 ms
+$ ip netns exec mtu-c ping -M do -n -c 2 -W 2 -s 1400 10.88.1.2
+PING 10.88.1.2 (10.88.1.2) 1400(1428) bytes of data.
+
+--- 10.88.1.2 ping statistics ---
+2 packets transmitted, 0 received, 100% packet loss, time 1020ms
+
+
+== small GET (should complete) ==
+$ ip netns exec mtu-c curl -sS -m 4 -D - -o /dev/null http://10.88.1.2:8080/healthz
+HTTP/1.0 200 OK
+Content-Length: 5
+Connection: close
+
+
+== 8 KB POST while ICMP is dropped (should stall) ==
+$ ip netns exec mtu-c curl -sS -m 4 -D - -o /tmp/zte-mtu-post-body --data-binary @/tmp/zte-post.bin http://10.88.1.2:8080/readyz
+curl: (28) Operation timed out after 4002 milliseconds with 0 bytes received
+curl exit 28 (28 is the curl timeout)
+
+== tcpdump during the stalled POST (lab capture) ==
+reading from file /workspace/docs/evidence/mtu-lab/pmtud-blackhole.pcap, link-type EN10MB (Ethernet), snapshot length 262144
+06:59:52.940822 IP 10.88.0.2.49062 > 10.88.1.2.8080: Flags [S], seq 311200947, win 64240, options [mss 1460,sackOK,TS val 2797450735 ecr 0,nop,wscale 7], length 0
+06:59:52.940843 IP 10.88.1.2.8080 > 10.88.0.2.49062: Flags [S.], seq 397737656, ack 311200948, win 65160, options [mss 1460,sackOK,TS val 1869973218 ecr 2797450735,nop,wscale 7], length 0
+06:59:52.940851 IP 10.88.0.2.49062 > 10.88.1.2.8080: Flags [.], ack 1, win 502, options [nop,nop,TS val 2797450735 ecr 1869973218], length 0
+06:59:52.940889 IP 10.88.0.2.49062 > 10.88.1.2.8080: Flags [P.], seq 1:7241, ack 1, win 502, options [nop,nop,TS val 2797450735 ecr 1869973218], length 7240: HTTP: POST /readyz HTTP/1.1
+06:59:52.940901 IP 10.88.0.2.49062 > 10.88.1.2.8080: Flags [P.], seq 7241:8348, ack 1, win 502, options [nop,nop,TS val 2797450735 ecr 1869973218], length 1107: HTTP
+06:59:52.940905 IP 10.88.1.2.8080 > 10.88.0.2.49062: Flags [.], ack 1, win 524, options [nop,nop,TS val 1869973218 ecr 2797450735,nop,nop,sack 1 {7241:8348}], length 0
+06:59:52.948311 IP 10.88.0.2.49062 > 10.88.1.2.8080: Flags [.], seq 1:1449, ack 1, win 502, options [nop,nop,TS val 2797450743 ecr 1869973218], length 1448: HTTP: POST /readyz HTTP/1.1
+06:59:53.156419 IP 10.88.0.2.49062 > 10.88.1.2.8080: Flags [.], seq 1:1449, ack 1, win 502, options [nop,nop,TS val 2797450951 ecr 1869973218], length 1448: HTTP: POST /readyz HTTP/1.1
+06:59:53.428292 IP6 fe80::42b:46ff:fe16:e9f0 > ff02::2: ICMP6, router solicitation, length 16
+06:59:53.588397 IP 10.88.0.2.49062 > 10.88.1.2.8080: Flags [.], seq 1:1449, ack 1, win 502, options [nop,nop,TS val 2797451383 ecr 1869973218], length 1448: HTTP: POST /readyz HTTP/1.1
+06:59:54.196300 IP6 fe80::88b9:d1ff:fe12:fe68 > ff02::2: ICMP6, router solicitation, length 16
+06:59:54.420295 IP 10.88.0.2.49062 > 10.88.1.2.8080: Flags [.], seq 1:1449, ack 1, win 502, options [nop,nop,TS val 2797452215 ecr 1869973218], length 1448: HTTP: POST /readyz HTTP/1.1
+06:59:56.084290 IP 10.88.0.2.49062 > 10.88.1.2.8080: Flags [.], seq 1:1449, ack 1, win 502, options [nop,nop,TS val 2797453879 ecr 1869973218], length 1448: HTTP: POST /readyz HTTP/1.1
+06:59:59.572334 IP 10.88.0.2.49062 > 10.88.1.2.8080: Flags [.], seq 1:1449, ack 1, win 502, options [nop,nop,TS val 2797457367 ecr 1869973218], length 1448: HTTP: POST /readyz HTTP/1.1
+
+== restore ICMP fragmentation-needed ==
+
+== DF ping 1400 after ICMP is restored (expect 'Frag needed' or a reply, not a silent timeout) ==
+$ ip netns exec mtu-c ping -M do -n -c 1 -W 2 -s 1400 10.88.1.2
+PING 10.88.1.2 (10.88.1.2) 1400(1428) bytes of data.
+From 10.88.0.1 icmp_seq=1 Frag needed and DF set (mtu = 1280)
+
+--- 10.88.1.2 ping statistics ---
+1 packets transmitted, 0 received, +1 errors, 100% packet loss, time 0ms
+
+
+== 8 KB POST after ICMP is restored (should complete) ==
+$ ip netns exec mtu-c curl -sS -m 8 -D - -o /tmp/zte-mtu-post-body2 --data-binary @/tmp/zte-post.bin http://10.88.1.2:8080/readyz
+HTTP/1.0 200 OK
+Content-Length: 5
+Connection: close
+
+curl exit 0
+body: ready
+
+pcap: /workspace/docs/evidence/mtu-lab/pmtud-blackhole.pcap
+transcript: /workspace/docs/evidence/mtu-lab/transcript.txt
+RESULT PASS  GET ok, 8KB POST stalled without ICMP frag-needed, POST recovered after restore

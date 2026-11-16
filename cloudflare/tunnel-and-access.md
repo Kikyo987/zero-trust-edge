@@ -63,16 +63,22 @@ this model is “in the grant”.
 What we are not doing: putting Magic WAN, a customer VPN appliance,
 and a tunnel in front of the same origin. One inbound story.
 
+The user plane ends at the Service network. Tailscale is not a hop on
+it. The database grant (`tag:app` → `tag:db:5432`) is a third ACL, not
+how users reach the app.
+
 ```mermaid
 flowchart LR
   Users["Users"] --> CF["Cloudflare<br/>WAF · TLS · Access"]
-  CF --> Tunnel["cloudflared<br/>outbound 443"]
-  Tunnel --> App["app :8080"]
+  CF --> CFD["cloudflared<br/>outbound 443"]
+  CFD --> SVC["Service network<br/>edge-echo.edge.svc:8080"]
+  SVC --> App["edge-echo"]
 
   Ops["Operators / CI"] --> TS["Tailscale ACL"]
-  TS --> SSH["sshd / kubectl"]
-  App --> DB["tag:db :5432"]
+  TS --> Node["sshd / kubectl / Grafana"]
 ```
+
+Drawing: [../docs/diagrams/dual-plane.svg](../docs/diagrams/dual-plane.svg).
 
 ---
 

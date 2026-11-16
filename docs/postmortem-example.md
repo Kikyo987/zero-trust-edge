@@ -1,16 +1,27 @@
-# Blameless postmortem: Cloudflare Tunnel MTU black hole
+# Simulated incident: Cloudflare Tunnel MTU black hole
 
-**Status:** published (worked example)  
-**Severity:** SEV-2  
-**Customer impact window:** 47 minutes (16:02–16:49 UTC)  
-**Time to mitigation:** 14 minutes from page  
-**Date:** 2026-03-12  
-**Author:** on-call network / platform  
-**Reviewers:** none required for this example  
+> **Document class: Simulated Incident and Lab Reproduction.**
+> **This is not a Production Incident.** No customer was paged, no status
+> page was updated, and the clock times below were not observed.
+> Section 3 is a teaching timeline. Section 10 is a lab that was actually
+> run; the commands and the packet capture there are real, and they are
+> labeled LAB.
 
-This is the template I send a founder. The timestamps are
-illustrative. The packet behaviour is not. Fill every heading; leave
-none as “n/a” without a sentence.
+**Status:** simulated write-up, with a local reproduction  
+**Severity used in the narrative:** SEV-2 (illustrative)  
+**Narrative window:** 47 minutes, invented for the timeline exercise  
+**Date of the narrative:** 2026-03-12 (not an outage date)  
+**Author:** platform / network, as a worked example  
+**Lab evidence:** [transcript](evidence/mtu-lab/transcript.txt), [pcap](evidence/mtu-lab/pmtud-blackhole.pcap), [summary screenshot](evidence/lab-report.png)
+
+The packet behaviour in the narrative is the behaviour the lab
+reproduces: a small GET completes, an 8 KB POST stalls when ICMP
+fragmentation-needed is dropped, and the POST completes after that
+ICMP message is allowed through. The timestamps are not a record of
+anything that happened.
+
+Blameless means the narrative describes what the *system* would have
+allowed, not who to blame. Names in the timeline are roles.
 
 Blameless means we describe what the *system* allowed, not who to
 blame. Names appear in the timeline as roles (on-call, change owner),
@@ -30,24 +41,30 @@ sessions; no data loss; operators were not locked out.
 
 ---
 
-## 2. Customer impact
+## 2. Hypothetical impact (illustrative — not observed)
 
-| Item | Value |
+Nothing in this table was measured. It is the shape of the impact the
+failure mode would have, so the write-up has somewhere to put a
+customer sentence. Do not quote it as an outage.
+
+| Item | Value in the narrative |
 | --- | --- |
 | Who | Authenticated users saving a form (POST ≥ ~1.4 KB) |
-| What they saw | Spinner, then a Cloudflare 524 or a browser timeout |
-| Start | 16:02 UTC |
-| End | 16:49 UTC (15 minutes of clean dashboards after the hotfix) |
-| Data loss | None — failed POSTs did not commit |
+| What they would see | Spinner, then a Cloudflare 524 or a browser timeout |
+| Start | 16:02 UTC (invented) |
+| End | 16:49 UTC (invented) |
+| Data loss | None in the story — failed POSTs would not commit |
 | Workaround | None for users. Operators could still SSH over Tailscale |
-| Status page | Updated 16:18 UTC |
+| Status page | Not updated. There was no incident. |
 
 ---
 
-## 3. Timeline (UTC)
+## 3. Illustrative timeline (not an observed outage)
 
-Times are when the event was *observed*, not when we wished it had
-been. Gaps are called out in §6.
+Every clock time in this table is made up, so the write-up can show
+what a real timeline looks like. Gaps in a real timeline would be
+called out in §6. Do not treat 15:40 or 16:49 as something that
+happened.
 
 | Time | Event |
 | --- | --- |
@@ -166,16 +183,73 @@ dd if=/dev/zero bs=8192 count=1 | \
   -X POST --data-binary @- https://app.example.com/readyz
 ```
 
-The 8 KB POST is now the synthetic in deploy.yml and in Prometheus.
-It would have paged at 15:41, not 16:02.
+The 8 KB POST is the synthetic in deploy.yml and in Prometheus.
+In the illustrative timeline, that check would have fired at 15:41
+instead of waiting for a person. Those clock times are still invented.
 
 ---
 
-## Template (copy for the next incident)
+## 10. Lab reproduction (this one was actually run)
+
+Ran on 2026-11-16 against network namespaces on the machine that
+produced this commit. Not a production path, not a Cloudflare 524,
+not a customer. Full command log:
+[evidence/mtu-lab/transcript.txt](evidence/mtu-lab/transcript.txt).
+Packet capture of the stalled POST:
+[evidence/mtu-lab/pmtud-blackhole.pcap](evidence/mtu-lab/pmtud-blackhole.pcap).
+
+Topology: client and server at MTU 1500, router hop toward the server
+at MTU 1280, forwarding on. While the failure is in place, the router
+drops ICMP type 3 code 4 (fragmentation needed).
+
+What the commands showed:
+
+```text
+# 1200-byte DF ping fits (1200 + 28 = 1228 < 1280)
+2 packets transmitted, 2 received, 0% packet loss
+
+# 1400-byte DF ping does not, and the drop hides the reason
+2 packets transmitted, 0 received, 100% packet loss
+
+# small GET
+HTTP/1.0 200 OK
+
+# 8 KB POST while ICMP is dropped
+curl: (28) Operation timed out after 4002 milliseconds with 0 bytes received
+
+# tcpdump on the router, client side, during that POST
+Flags [S], ... options [mss 1460, ...]
+Flags [P.], seq 1:7241, ... length 7240: HTTP: POST /readyz
+Flags [.], seq 1:1449, ... length 1448: HTTP: POST /readyz
+(retransmitted; the ack never moves past byte 1)
+
+# after the ICMP drop is removed
+From 10.88.0.1 icmp_seq=1 Frag needed and DF set (mtu = 1280)
+
+# same 8 KB POST
+HTTP/1.0 200 OK
+body: ready
+```
+
+The capture is the black hole: TCP negotiated MSS 1460 from the local
+1500-byte NICs, then retransmitted a 1448-byte segment that cannot
+cross the 1280-byte hop, with no ICMP coming back. Restoring ICMP
+type 3 code 4 is what lets the next POST shrink and finish.
+
+Replay:
+
+```bash
+sudo ./security-tests/lab/mtu-blackhole.sh
+```
+
+---
+
+## Template (copy for the next real incident)
 
 ```
 # Blameless postmortem: <one-line title>
 
+Document class: Production Incident | Simulated Incident | Lab Reproduction
 Status / Severity / Impact window / Time to mitigation / Date / Author
 
 ## 1. Summary

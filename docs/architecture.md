@@ -50,38 +50,37 @@ Gateway. Numbers live in [finops.md](finops.md).
 
 ## 2. Reference diagram
 
+The picture is two planes. Drawing the tunnel as a hop *through* Tailscale
+is wrong, and it is the question a network reviewer will ask. `cloudflared`
+is a client of Cloudflare and a client of the cluster Service. `tailscale0`
+is the operator NIC. They are both on the node. Neither is a next hop for
+the other.
+
 ```mermaid
 flowchart LR
-  Internet["Internet"] --> Cloudflare["Cloudflare<br/>WAF · TLS · Zero Trust Access"]
-  Cloudflare --> Tunnel["cloudflared Tunnel<br/>outbound TCP/443 only"]
-  Tunnel --> Private["Private Network<br/>Tailscale mesh + ACL"]
-  Private --> Workloads["k3s / Docker"]
+  subgraph userPlane [User plane]
+    U[Internet users] --> CF["Cloudflare<br/>Access · WAF · TLS"]
+    CF --> CFD["cloudflared<br/>outbound :443"]
+    CFD --> SVC["Service network<br/>edge-echo.edge.svc:8080"]
+    SVC --> APP[edge-echo]
+  end
+  subgraph opsPlane [Operator plane]
+    OPS[group:ops] --> ACL["Tailscale ACL<br/>100.64.0.0/10"]
+    CI[tag:ci] --> ACL
+    ACL --> NODE["node<br/>SSH :22 · kubectl :6443"]
+    ACL --> MON["Grafana :3000<br/>group:ops only"]
+  end
 ```
 
-```mermaid
-flowchart TB
-  Users["Users"]
-  Ops["Operators / CI"]
+SVG with the CIDRs on it: [diagrams/dual-plane.svg](diagrams/dual-plane.svg).
 
-  subgraph Cloudflare["Cloudflare — identity for users"]
-    Access["Zero Trust Access"]
-    Edge["WAF + TLS 1.3"]
-    Named["Named Tunnel UUID"]
-  end
-
-  subgraph Private["Private network — no inbound from 0.0.0.0/0"]
-    TS["Tailscale ACL<br/>tag:ops / tag:ci / tag:node"]
-    CFD["cloudflared"]
-    subgraph Host["Node 10.42.10.0/24 or VPS"]
-      K3S["k3s · ClusterIP · NetworkPolicy"]
-      Docker["Compose bound to 127.0.0.1"]
-      App["edge-echo :8080 non-root"]
-    end
-  end
-
-  Users --> Access --> Edge --> Named --> CFD --> App
-  Ops --> TS --> Host
-```
+| Hop | Where the packet actually goes |
+| --- | --- |
+| User → Cloudflare | Public anycast. TLS terminates here. Access runs here, before the tunnel. |
+| Cloudflare → cloudflared | cloudflared's **outbound** session (TCP/443 or QUIC/443). Return traffic is the same flow. |
+| cloudflared → app | `http://edge-echo.edge.svc.cluster.local:8080` (k3s) or `http://edge-echo:8080` (compose). Pod / service CIDR, not `100.64.0.0/10`. |
+| Operator → node | WireGuard to `100.x`. ACL in `tailscale/acl.hujson`. |
+| CI → node | Same mesh, `tag:ci`, tcp/22 only. |
 
 DNS for product hostnames is a CNAME to `<TUNNEL-UUID>.cfargotunnel.com`.
 There is no A/AAAA record for the node. If the node has a public IPv4 for
@@ -132,7 +131,7 @@ Failure modes that look like “the app is down” but are not:
 | --- | --- |
 | 1033 | cloudflared process or token |
 | Access loop | clock skew (NTP egress) or cookie domain |
-| 524 / GET works, POST hangs | MTU / PMTUD — see [postmortem-example.md](postmortem-example.md) |
+| 524 / GET works, POST hangs | MTU / PMTUD — simulated write-up in [postmortem-example.md](postmortem-example.md) |
 
 ### 3.2 Operator session (SSH, kubectl, Grafana)
 
@@ -141,7 +140,7 @@ operator laptop (tailscaled)
   │  WireGuard, inner MTU 1280
   ▼
 Tailscale coordination  (DERP if NAT traversal fails)
-  │  ACL: group:ops → tag:node :22 :6443 :3000 :9090
+  │  ACL: group:ops → tag:node :22 :6443 :3000 :9090 :3100
   ▼
 node tailscale0  100.x.y.z
   │  sshd ListenAddress = 100.x.y.z  (+ 127.0.0.1)
@@ -231,7 +230,7 @@ Even a hole punched in ufw on `:22` does not expose SSH on the WAN address.
 
 | Source | Destination | Ports |
 | --- | --- | --- |
-| `group:ops` | `tag:node` | 22, 6443, 3000, 9090, 3100, 8080 |
+| `group:ops` | `tag:node` | 22, 6443, 3000, 9090, 3100 |
 | `tag:ci` | `tag:node` | 22 only |
 | `tag:node` | `tag:node` | all (future HA) |
 
@@ -266,9 +265,15 @@ Namespace `edge` is default-deny for ingress and egress. Holes:
 
 - DNS to `kube-system` / `10.44.0.0/16`
 - Ingress to `app=edge-echo` from `app=cloudflared` in `cloudflare-tunnel`
+- Ingress to `app=edge-echo` from pods in `edge` labeled `edge.zero-trust/role=probe` (synthetic probes only — not every pod in the namespace, and not the kubelet)
+- Egress from those probe pods to `app=edge-echo:8080` (and the Service CIDR on tcp/8080, because kube-proxy DNATs the ClusterIP)
 - Ingress to `app=edge-echo` from `monitoring` (scrape)
 - Egress from cloudflared to the app, to DNS, and to `0.0.0.0/0:443`
   except RFC1918 and Tailscale CGNAT
+
+Kubelet probes are node-originated. A `namespaceSelector` on `edge` does
+not select the kubelet, and it does select every other pod. The manifest
+does not use that shortcut. See `k3s/manifests/10-network-policy.yaml`.
 
 The app has **no** arbitrary internet egress unless a later NetworkPolicy
 says so. “Allow all egress to make the demo work” is how a compromised
@@ -439,7 +444,7 @@ people. HA is a second node in `10.42.11.0/24`, not a new architecture.
 | File | Role |
 | --- | --- |
 | [finops.md](finops.md) | Cost of each NAT / public-IP choice |
-| [postmortem-example.md](postmortem-example.md) | MTU black hole, 47 minutes |
+| [postmortem-example.md](postmortem-example.md) | Simulated MTU black hole, with a local lab reproduction |
 | [../cloudflare/tunnel-and-access.md](../cloudflare/tunnel-and-access.md) | Named tunnel, Access, rotation |
 | [../tailscale/acl.hujson](../tailscale/acl.hujson) | Operator / CI grants |
 | [../terraform/modules/security/main.tf](../terraform/modules/security/main.tf) | Empty ingress, strict egress |

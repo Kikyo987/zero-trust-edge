@@ -47,8 +47,11 @@ Prefixes that match the tree, when useful:
 Do not commit `.env`, `terraform.tfvars`, tunnel tokens, Tailscale auth
 keys, or Alertmanager webhook files. See `.gitignore`.
 
-PRs should keep `ci` green (fmt, `go test`, Trivy, kubeconform). Deploy
-is manual and is not part of the PR check.
+PRs should keep `ci` and `security` green (fmt, `go test`, Trivy,
+kubeconform, the lab security checks, the MTU reproduction). A push to
+`main` also runs the staging deploy workflow. Remote steps are skipped
+when the staging environment has no Tailscale secrets. Production is
+`workflow_dispatch` only.
 
 ## Security
 

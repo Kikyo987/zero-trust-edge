@@ -41,6 +41,9 @@ spec:
         - protocol: TCP
           port: 53
 ---
+# cloudflared only. A namespaceSelector on `edge` with no podSelector
+# matches every Pod in the namespace. That is not the kubelet (probes
+# are node-originated) and it is wider than the old comment claimed.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -60,10 +63,63 @@ spec:
           podSelector:
             matchLabels:
               app: cloudflared
-        # in-namespace probes (kubelet HTTP on the CNI IP)
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# Synthetic probes (deploy health-check, security-tests). Both selectors
+# are required: the pod must live in `edge` AND carry the label.
+# Kubelet liveness/readiness probes are not pods; do not widen this to
+# the whole namespace to "make probes work".
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-probes
+  namespace: edge
+spec:
+  podSelector:
+    matchLabels:
+      app: edge-echo
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: edge
+          podSelector:
+            matchLabels:
+              edge.zero-trust/role: probe
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# Probe pods are in `edge`, so default-deny applies to their egress too.
+# Ingress on edge-echo is not enough. Service DNS lands on the ClusterIP
+# (10.44.0.0/16) before kube-proxy DNATs to the pod, so the Service CIDR
+# on tcp/8080 is the second match. It is not a general internet allow.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-probe-egress
+  namespace: edge
+spec:
+  podSelector:
+    matchLabels:
+      edge.zero-trust/role: probe
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: edge-echo
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - ipBlock:
+            cidr: 10.44.0.0/16
       ports:
         - protocol: TCP
           port: 8080

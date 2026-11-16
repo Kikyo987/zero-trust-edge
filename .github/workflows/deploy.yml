@@ -1,19 +1,40 @@
-# Remote deploy over Tailscale. Manual only, plus GitHub Environment
-# protection on staging/production.
+# Remote deploy over Tailscale.
 #
-# Build uses GITHUB_TOKEN (always present). The Tailscale steps run
-# only when OAuth secrets and NODE_TAILSCALE_IP are set — a dispatch
-# without them stays green and prints why it skipped.
+# Two triggers:
+#   push to main — staging only. If the staging environment has no
+#     Tailscale secrets or NODE_TAILSCALE_IP, the remote steps are
+#     skipped and the workflow stays green. Production is never selected.
+#   workflow_dispatch — staging or production, with that environment's
+#     protection rules.
+#
+# A skipped remote deploy is SKIPPED, not SUCCESS. A failed image push
+# fails the build, and the node is not touched.
+#
+# Image tag is the commit that was checked out (`git rev-parse HEAD`),
+# not github.sha. On workflow_dispatch, github.sha is the workflow
+# file's commit, which is not the `ref` input when those differ.
+#
+# A failed GHCR push fails the build job. The deploy job does not run,
+# so it cannot roll out a tag that was never pushed.
+#
+# Outcomes (job `outcome`, also scripts/deploy-outcome.sh):
+#   SUCCESS  rollout, digest check, and the probes that ran
+#   SKIPPED  no Tailscale target configured; nothing was deployed
+#   FAILURE  build, push, rollout, digest, probe, or rollback check failed
 #
 # Per-environment (Settings → Environments → staging | production):
 #   secrets: TAILSCALE_OAUTH_CLIENT_ID, TAILSCALE_OAUTH_CLIENT_SECRET
 #   vars:    NODE_TAILSCALE_IP, NODE_SSH_USER
+#   vars (optional): APP_EXTERNAL_URL  — post-deploy probe through Cloudflare.
+#                    Unset means the external probe is SKIPPED, not passed.
 #
-# ACL: tag:ci → tag:node:22  (cloudflare/tailscale-acl.hujson)
+# ACL: tag:ci → tag:node:22  (tailscale/acl.hujson)
 
 name: deploy
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       environment:
@@ -28,7 +49,7 @@ on:
         required: false
         default: "main"
       skip_build:
-        description: "Skip Buildx and reuse the existing GHCR tag for this SHA"
+        description: "Skip Buildx and reuse the GHCR tag for the checked-out SHA"
         required: false
         type: boolean
         default: false
@@ -39,35 +60,40 @@ permissions:
   id-token: write
 
 concurrency:
-  group: deploy-${{ github.event.inputs.environment }}
+  group: deploy-${{ github.event_name == 'push' && 'staging' || github.event.inputs.environment }}
   cancel-in-progress: false
 
 jobs:
   preflight:
     runs-on: ubuntu-24.04
     outputs:
-      can_deploy: ${{ steps.gate.outputs.can_deploy }}
       do_build: ${{ steps.gate.outputs.do_build }}
+      sha: ${{ steps.sha.outputs.sha }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || github.event.inputs.ref || github.ref_name }}
+
+      - id: sha
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "Checked-out commit ${sha}"
+          echo "workflow github.sha is ${GITHUB_SHA} (not used as the image tag)"
+          if [[ "${sha}" != "${GITHUB_SHA}" ]]; then
+            echo "Image tag will follow the checked-out commit, not github.sha."
+          fi
+
       - id: gate
         env:
-          TS_ID: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
-          TS_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
-          NODE: ${{ vars.NODE_TAILSCALE_IP }}
           SKIP_BUILD: ${{ github.event.inputs.skip_build }}
         run: |
           set -euo pipefail
           do_build=true
           [[ "${SKIP_BUILD}" == "true" ]] && do_build=false
           echo "do_build=${do_build}" >> "$GITHUB_OUTPUT"
-
-          if [[ -n "${TS_ID}" && -n "${TS_SECRET}" && -n "${NODE}" ]]; then
-            echo "can_deploy=true" >> "$GITHUB_OUTPUT"
-            echo "Tailscale secrets and NODE_TAILSCALE_IP are set."
-          else
-            echo "can_deploy=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Skipping remote deploy: set TAILSCALE_OAUTH_CLIENT_ID/SECRET and NODE_TAILSCALE_IP on the ${{ github.event.inputs.environment }} environment."
-          fi
+          echo "event=${{ github.event_name }} do_build=${do_build}"
 
   build:
     needs: [preflight]
@@ -75,26 +101,26 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     outputs:
-      digest: ${{ steps.build.outputs.digest }}
-      remote: ${{ steps.meta.outputs.remote }}
+      digest: ${{ steps.push.outputs.digest }}
+      ref: ${{ steps.push.outputs.ref }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.ref }}
+          ref: ${{ needs.preflight.outputs.sha }}
+
+      - name: assert checked-out sha
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          test "${head}" = "${{ needs.preflight.outputs.sha }}"
+          echo "building ${head}"
 
       - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        continue-on-error: true
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - id: meta
         run: echo "remote=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
-      - id: build
+      - name: build
         uses: docker/build-push-action@v6
         with:
           context: docker/app
@@ -119,41 +145,127 @@ jobs:
               --scanners vuln \
               edge-echo:ci
 
+      - name: login
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: push
-        continue-on-error: true
+        id: push
         env:
           REMOTE: ${{ steps.meta.outputs.remote }}
+          SHA: ${{ needs.preflight.outputs.sha }}
           TARGET_ENV: ${{ github.event.inputs.environment }}
         run: |
           set -euo pipefail
-          docker tag edge-echo:ci "${REMOTE}:${GITHUB_SHA}"
+          ref="${REMOTE}:${SHA}"
+          docker tag edge-echo:ci "${ref}"
           docker tag edge-echo:ci "${REMOTE}:${TARGET_ENV}"
-          docker push "${REMOTE}:${GITHUB_SHA}" || echo "::warning::GHCR push of :${GITHUB_SHA} skipped"
-          docker push "${REMOTE}:${TARGET_ENV}" || echo "::warning::GHCR push of :${TARGET_ENV} skipped"
+          docker push "${ref}" | tee /tmp/push-sha.txt
+          digest="$(grep -oE 'sha256:[0-9a-f]{64}' /tmp/push-sha.txt | tail -1)"
+          if [[ -z "${digest}" ]]; then
+            echo "push of ${ref} produced no digest; refusing to continue" >&2
+            exit 1
+          fi
+          docker push "${REMOTE}:${TARGET_ENV}" | tee /tmp/push-env.txt
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "pushed ${ref}@${digest}"
 
   deploy:
     needs: [preflight, build]
-    if: ${{ always() && needs.preflight.outputs.can_deploy == 'true' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    if: ${{ always() && needs.preflight.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    environment: ${{ github.event.inputs.environment }}
+    environment: ${{ github.event_name == 'push' && 'staging' || github.event.inputs.environment }}
+    outputs:
+      remote: ${{ steps.gate.outputs.remote }}
+      external_probe: ${{ steps.external.outputs.status }}
+      security_after_rollback: ${{ steps.rollback.outputs.security }}
+      rollback: ${{ steps.rollback.outputs.attempted }}
     env:
       NODE: ${{ vars.NODE_TAILSCALE_IP }}
       USER: ${{ vars.NODE_SSH_USER || 'ubuntu' }}
-      TARGET_ENV: ${{ github.event.inputs.environment }}
+      TARGET_ENV: ${{ github.event_name == 'push' && 'staging' || github.event.inputs.environment }}
+      SHA: ${{ needs.preflight.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.ref }}
-
-      - name: resolve image
-        id: image
+      - name: remote gate
+        id: gate
+        env:
+          TS_ID: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
+          TS_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+          NODE: ${{ vars.NODE_TAILSCALE_IP }}
         run: |
           set -euo pipefail
-          REMOTE="ghcr.io/${GITHUB_REPOSITORY,,}"
-          echo "ref=${REMOTE}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "target environment: ${TARGET_ENV}"
+          if [[ "${TARGET_ENV}" == "production" && "${{ github.event_name }}" == "push" ]]; then
+            echo "push to main must not select production" >&2
+            exit 1
+          fi
+          if [[ -n "${TS_ID}" && -n "${TS_SECRET}" && -n "${NODE}" ]]; then
+            echo "remote=true" >> "$GITHUB_OUTPUT"
+            echo "Tailscale secrets and NODE_TAILSCALE_IP are set. Remote deploy will run."
+          else
+            echo "remote=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Remote deploy skipped for ${TARGET_ENV}. Set TAILSCALE_OAUTH_CLIENT_ID, TAILSCALE_OAUTH_CLIENT_SECRET, and NODE_TAILSCALE_IP on that environment. Production is not used by a push."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.remote == 'true'
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
+
+      - name: assert checked-out sha
+        if: steps.gate.outputs.remote == 'true'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${SHA}"
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.gate.outputs.remote == 'true'
+
+      - name: login
+        if: steps.gate.outputs.remote == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: resolve image
+        if: steps.gate.outputs.remote == 'true'
+        id: image
+        env:
+          BUILT_DIGEST: ${{ needs.build.outputs.digest }}
+          DO_BUILD: ${{ needs.preflight.outputs.do_build }}
+        run: |
+          set -euo pipefail
+          remote="ghcr.io/${GITHUB_REPOSITORY,,}"
+          ref="${remote}:${SHA}"
+          docker buildx imagetools inspect "${ref}" | tee /tmp/inspect.txt
+          digest="$(grep -oE 'sha256:[0-9a-f]{64}' /tmp/inspect.txt | head -1)"
+          if [[ -z "${digest}" ]]; then
+            echo "registry has no ${ref}; refusing to deploy a missing tag" >&2
+            exit 1
+          fi
+          if [[ "${DO_BUILD}" == "true" ]]; then
+            if [[ -z "${BUILT_DIGEST}" ]]; then
+              echo "build did not record a digest" >&2
+              exit 1
+            fi
+            if [[ "${digest}" != "${BUILT_DIGEST}" ]]; then
+              echo "registry digest ${digest} != build digest ${BUILT_DIGEST}" >&2
+              exit 1
+            fi
+          fi
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "deploying ${ref}@${digest}"
 
       - name: Tailscale
+        if: steps.gate.outputs.remote == 'true'
         uses: tailscale/github-action@v2
         with:
           oauth-client-id: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
@@ -162,6 +274,7 @@ jobs:
           args: --ssh --timeout=30s
 
       - name: wait for node
+        if: steps.gate.outputs.remote == 'true'
         run: |
           set -euo pipefail
           for i in $(seq 1 15); do
@@ -175,98 +288,249 @@ jobs:
           exit 1
 
       - name: snapshot current image
+        if: steps.gate.outputs.remote == 'true'
         id: prev
         run: |
           set -euo pipefail
-          PREV="$(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes \
+          read -r PREV PREV_DIGEST < <(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes \
             "${USER}@${NODE}" \
-            "sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n edge get deploy edge-echo -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true")"
-          echo "image=${PREV}" >> "$GITHUB_OUTPUT"
+            "sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n edge get deploy edge-echo -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null; printf ' '; sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n edge get pod -l app=edge-echo -o jsonpath='{.items[0].status.containerStatuses[0].imageID}' 2>/dev/null || true; printf '\n'")
+          echo "image=${PREV:-}" >> "$GITHUB_OUTPUT"
+          # imageID is repo@sha256:... — keep the sha256 token only when present.
+          digest="$(printf '%s\n' "${PREV_DIGEST:-}" | grep -oE 'sha256:[0-9a-f]{64}' | head -1 || true)"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           echo "previous image: ${PREV:-none}"
+          echo "previous digest: ${digest:-none}"
 
-      - name: apply and health-check
+      - name: apply
+        if: steps.gate.outputs.remote == 'true'
         id: apply
         env:
           IMAGE: ${{ steps.image.outputs.ref }}
-          PREV: ${{ steps.prev.outputs.image }}
         run: |
           set -euo pipefail
           ssh -o BatchMode=yes "${USER}@${NODE}" "sudo mkdir -p /opt/edge && sudo chown ${USER}:${USER} /opt/edge"
           tar czf /tmp/edge.tgz k3s monitoring scripts cloudflare
           scp -o StrictHostKeyChecking=accept-new /tmp/edge.tgz "${USER}@${NODE}:/opt/edge/edge.tgz"
-
           ssh -o BatchMode=yes "${USER}@${NODE}" \
-            "IMAGE=$(printf %q "${IMAGE}") PREV=$(printf %q "${PREV}") TARGET_ENV=$(printf %q "${TARGET_ENV}") bash -s" <<'REMOTE'
+            "IMAGE=$(printf %q "${IMAGE}") TARGET_ENV=$(printf %q "${TARGET_ENV}") bash -s" <<'REMOTE'
           set -euo pipefail
           cd /opt/edge
           tar xzf edge.tgz
           sudo sed -i "s|image: ghcr.io/.*/edge-echo:.*|image: ${IMAGE}|" k3s/manifests/20-deployment.yaml
           sudo sed -i "s|image: ghcr.io/.*/zero-trust-edge:.*|image: ${IMAGE}|" k3s/manifests/20-deployment.yaml
-
           KCTL="sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl"
           if ! command -v kubectl >/dev/null || ! sudo test -f /etc/rancher/k3s/k3s.yaml; then
             echo "k3s not installed; files dropped at /opt/edge"
             exit 20
           fi
-
           ${KCTL} apply -f k3s/manifests/
           ${KCTL} -n edge annotate deploy/edge-echo \
             environment="${TARGET_ENV}" \
             --overwrite
+          echo "applied ${IMAGE}"
+          REMOTE
+          echo "applied=true" >> "$GITHUB_OUTPUT"
 
-          if ! ${KCTL} -n edge rollout status deploy/edge-echo --timeout=120s; then
+      - name: wait for rollout and check digest
+        if: steps.gate.outputs.remote == 'true'
+        id: digest
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+          EXPECTED_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes "${USER}@${NODE}" \
+            "IMAGE=$(printf %q "${IMAGE}") EXPECTED_DIGEST=$(printf %q "${EXPECTED_DIGEST}") bash -s" <<'REMOTE'
+          set -euo pipefail
+          KCTL="sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl"
+          if ! ${KCTL} -n edge rollout status deploy/edge-echo --timeout=180s; then
             echo "ROLLING_BACK rollout status failed"
             exit 30
           fi
+          post_image="$(${KCTL} -n edge get deploy edge-echo -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          if [[ "${post_image}" != "${IMAGE}" ]]; then
+            echo "post-deploy image ${post_image} != ${IMAGE}"
+            exit 33
+          fi
+          post_ids="$(${KCTL} -n edge get pod -l app=edge-echo -o jsonpath='{range .items[*]}{.status.containerStatuses[0].imageID}{"\n"}{end}')"
+          echo "post imageIDs:"
+          printf '%s\n' "${post_ids}"
+          if ! printf '%s\n' "${post_ids}" | grep -q "${EXPECTED_DIGEST}"; then
+            echo "no ready pod imageID contains ${EXPECTED_DIGEST}"
+            exit 34
+          fi
+          echo "digest check passed ${IMAGE}@${EXPECTED_DIGEST}"
+          REMOTE
 
+      - name: in-cluster probes
+        if: steps.gate.outputs.remote == 'true'
+        id: incluster
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes "${USER}@${NODE}" bash -s <<'REMOTE'
+          set -euo pipefail
+          KCTL="sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl"
+          # Label edge.zero-trust/role=probe is the only in-namespace source
+          # allow-from-probes accepts. The pod also has to satisfy the
+          # restricted Pod Security level on the edge namespace.
           probe() {
-            local name="$1" script="$2"
-            ${KCTL} -n edge delete pod "${name}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-            ${KCTL} -n edge run "${name}" --restart=Never --image=alpine:3.21 --command -- \
-              /bin/sh -c "${script}"
-            ${KCTL} -n edge wait --for=jsonpath='{.status.phase}'=Succeeded pod/"${name}" --timeout=30s
+            local name="$1"
+            local script="$2"
+            ${KCTL} -n edge delete pod "${name}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+            python3 /opt/edge/scripts/render-probe-pod.py "${name}" "${script}" \
+              | ${KCTL} -n edge apply -f -
+            if ! ${KCTL} -n edge wait --for=jsonpath='{.status.phase}'=Succeeded pod/"${name}" --timeout=90s; then
+              ${KCTL} -n edge describe pod/"${name}" || true
+              ${KCTL} -n edge logs "${name}" || true
+              ${KCTL} -n edge delete pod "${name}" --wait=false >/dev/null 2>&1 || true
+              return 1
+            fi
             ${KCTL} -n edge logs "${name}"
             ${KCTL} -n edge delete pod "${name}" --wait=false >/dev/null 2>&1 || true
           }
-
           if ! probe "healthz-ci" "wget -qO- --timeout=5 http://edge-echo.edge.svc:8080/healthz | grep -q ok"; then
             echo "ROLLING_BACK healthz failed"
             exit 31
           fi
-
-          if ! probe "readyz-ci" "dd if=/dev/zero bs=8192 count=1 of=/tmp/p 2>/dev/null; wget -qO- --timeout=8 --post-file=/tmp/p http://edge-echo.edge.svc:8080/readyz | grep -q ready"; then
+          if ! probe "readyz-ci" "dd if=/dev/zero bs=8192 count=1 of=/tmp/p; wget -qO- --timeout=8 --post-file=/tmp/p http://edge-echo.edge.svc:8080/readyz | grep -q ready"; then
             echo "ROLLING_BACK large POST /readyz failed (MTU?)"
             exit 32
           fi
-
-          echo "health-check passed env=${TARGET_ENV} image=${IMAGE}"
+          echo "in-cluster probes passed"
           REMOTE
 
-      - name: rollback
-        if: failure() && steps.apply.outcome == 'failure' && steps.prev.outputs.image != ''
+      - name: external http probe
+        if: steps.gate.outputs.remote == 'true'
+        id: external
         env:
-          PREV: ${{ steps.prev.outputs.image }}
+          APP_URL: ${{ vars.APP_EXTERNAL_URL }}
         run: |
           set -euo pipefail
-          echo "rolling back to ${PREV}"
+          if [[ -z "${APP_URL}" ]]; then
+            echo "status=skipped" >> "$GITHUB_OUTPUT"
+            echo "APP_EXTERNAL_URL is unset. External probe SKIPPED (not a pass)."
+            echo "Set it to https://app.example.com on the environment to probe through Cloudflare."
+            exit 0
+          fi
+          code="$(curl -sS -o /tmp/external-body -w '%{http_code}' --max-time 20 "${APP_URL%/}/healthz" || echo 000)"
+          echo "external ${APP_URL%/}/healthz -> HTTP ${code}"
+          case "${code}" in
+            200|301|302|303|307|308|401|403)
+              echo "status=pass" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "status=fail" >> "$GITHUB_OUTPUT"
+              echo "external probe failed (timeouts and 5xx roll the deploy back)" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: rollback
+        id: rollback
+        if: failure() && steps.gate.outputs.remote == 'true' && steps.apply.outputs.applied == 'true'
+        env:
+          PREV: ${{ steps.prev.outputs.image }}
+          PREV_DIGEST: ${{ steps.prev.outputs.digest }}
+        run: |
+          set -euo pipefail
+          echo "attempted=true" >> "$GITHUB_OUTPUT"
+          echo "rolling back to ${PREV:-<unknown>} (${PREV_DIGEST:-no digest})"
+          set +e
           ssh -o BatchMode=yes "${USER}@${NODE}" \
-            "PREV=$(printf %q "${PREV}") bash -s" <<'REMOTE'
+            "PREV=$(printf %q "${PREV}") PREV_DIGEST=$(printf %q "${PREV_DIGEST}") bash -s" <<'REMOTE'
           set -euo pipefail
           KCTL="sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl"
+          if [[ -z "${PREV}" ]]; then
+            echo "no previous image recorded; not guessing a rollback target" >&2
+            exit 39
+          fi
           ${KCTL} -n edge rollout undo deploy/edge-echo || \
             ${KCTL} -n edge set image deploy/edge-echo edge-echo="${PREV}"
-          ${KCTL} -n edge rollout status deploy/edge-echo --timeout=120s
+          ${KCTL} -n edge rollout status deploy/edge-echo --timeout=180s
+          now="$(${KCTL} -n edge get deploy edge-echo -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          if [[ "${now}" != "${PREV}" ]]; then
+            echo "rollback image ${now} != pre-deploy ${PREV}" >&2
+            exit 40
+          fi
+          if [[ -n "${PREV_DIGEST}" ]]; then
+            ids="$(${KCTL} -n edge get pod -l app=edge-echo -o jsonpath='{range .items[*]}{.status.containerStatuses[0].imageID}{"\n"}{end}')"
+            echo "rollback imageIDs:"
+            printf '%s\n' "${ids}"
+            if ! printf '%s\n' "${ids}" | grep -q "${PREV_DIGEST}"; then
+              echo "pre-deploy digest ${PREV_DIGEST} was not restored" >&2
+              exit 41
+            fi
+          fi
           ${KCTL} -n edge get deploy,rs,pods -o wide
+          if ! sudo /opt/edge/scripts/zero-trust-verify.sh; then
+            echo "SECURITY_AFTER_ROLLBACK=fail"
+            exit 42
+          fi
+          echo "SECURITY_AFTER_ROLLBACK=pass"
           REMOTE
-          echo "rollback to ${PREV} complete"
-          exit 1
+          rc=$?
+          set -e
+          if [[ "${rc}" -eq 0 ]]; then
+            echo "security=pass" >> "$GITHUB_OUTPUT"
+            echo "rollback restored ${PREV} and zero-trust-verify passed"
+            echo "deploy job stays failed because the new rollout did not"
+            exit 0
+          fi
+          echo "security=fail" >> "$GITHUB_OUTPUT"
+          echo "rollback or the post-rollback security check failed" >&2
+          exit "${rc}"
 
       - name: zero-trust verify
-        if: success()
+        if: success() && steps.gate.outputs.remote == 'true'
         run: |
           ssh -o BatchMode=yes "${USER}@${NODE}" "sudo /opt/edge/scripts/zero-trust-verify.sh"
 
       - name: logout of tailnet
-        if: always()
+        if: always() && steps.gate.outputs.remote == 'true'
         continue-on-error: true
         run: sudo tailscale logout || true
+
+  outcome:
+    needs: [preflight, build, deploy]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: classify
+        env:
+          PREFLIGHT: ${{ needs.preflight.result }}
+          BUILD: ${{ needs.build.result }}
+          DEPLOY: ${{ needs.deploy.result }}
+          REMOTE: ${{ needs.deploy.outputs.remote }}
+          SHA: ${{ needs.preflight.outputs.sha }}
+          EXTERNAL: ${{ needs.deploy.outputs.external_probe }}
+          ROLLBACK: ${{ needs.deploy.outputs.rollback }}
+          ROLLBACK_SECURITY: ${{ needs.deploy.outputs.security_after_rollback }}
+        run: |
+          set -euo pipefail
+          set +e
+          summary="$(./scripts/deploy-outcome.sh "${PREFLIGHT}" "${BUILD}" "${DEPLOY}" "${REMOTE}")"
+          rc=$?
+          set -e
+          result="$(printf '%s\n' "${summary}" | head -1)"
+          reason="$(printf '%s\n' "${summary}" | tail -n +2)"
+          {
+            echo "### Deploy result: ${result}"
+            echo
+            echo "${reason}"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| checked-out sha | \`${SHA}\` |"
+            echo "| preflight | ${PREFLIGHT} |"
+            echo "| build | ${BUILD} |"
+            echo "| deploy | ${DEPLOY} |"
+            echo "| remote tailnet | ${REMOTE:-false} |"
+            echo "| external HTTP probe | ${EXTERNAL:-not-run} |"
+            echo "| rollback | ${ROLLBACK:-not-attempted} |"
+            echo "| security after rollback | ${ROLLBACK_SECURITY:-not-run} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "DEPLOY_RESULT=${result}"
+          printf '%s\n' "${summary}"
+          exit "${rc}"
