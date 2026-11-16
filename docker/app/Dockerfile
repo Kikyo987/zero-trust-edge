@@ -9,7 +9,7 @@
 # Build:
 #   docker build -t ghcr.io/example/edge-echo:1.0.0 --target runtime .
 
-FROM golang:1.22-bookworm AS build
+FROM golang:1.27-bookworm AS build
 WORKDIR /src
 ENV CGO_ENABLED=0 GOOS=linux
 COPY go.mod go.sum ./
