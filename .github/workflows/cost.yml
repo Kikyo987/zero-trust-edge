@@ -1,6 +1,4 @@
-# Weekly idle-resource hunt. Needs AWS OIDC (vars.AWS_ROLE_ARN) with
-# read-only CE / EC2 / ELB permissions. Fails the job if a NAT Gateway
-# or 0.0.0.0/0 inbound SG appears — that is a regression, not a bill.
+# Weekly idle-resource hunt. Skips cleanly when AWS OIDC is not configured.
 name: cost-snapshot
 
 on:
@@ -24,3 +22,9 @@ jobs:
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
       - name: snapshot
         run: ./scripts/cost-snapshot.sh
+
+  skip:
+    if: ${{ vars.AWS_ROLE_ARN == '' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "AWS_ROLE_ARN is not set; cost snapshot skipped. Workflow stays green."

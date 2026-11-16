@@ -1,5 +1,6 @@
-# Build, lint, scan. No deploy, no secrets required besides GHCR push
-# on the default branch.
+# Push / PR: build the image and run Trivy. No deploy, no extra secrets.
+# GHCR push is best-effort. A denied push must not fail the job — the
+# scan already ran against the local image.
 name: ci
 
 on:
@@ -19,7 +20,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/edge-echo
   GO_VERSION: "1.27.2"
 
 jobs:
@@ -53,52 +53,53 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
 
+  yaml:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: kubeconform
+        uses: docker://ghcr.io/yannh/kubeconform:v0.6.7
+        with:
+          args: -strict -ignore-missing-schemas -summary k3s/manifests
+
   image:
     runs-on: ubuntu-24.04
     needs: [go]
     permissions:
       contents: read
       packages: write
-      id-token: write
-      security-events: write
-    outputs:
-      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
+
+      - name: image name
+        id: name
+        run: |
+          # GITHUB_TOKEN may only push packages named after this repository.
+          echo "local=edge-echo:ci" >> "$GITHUB_OUTPUT"
+          echo "remote=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
       - uses: docker/login-action@v3
         if: github.event_name != 'pull_request'
+        continue-on-error: true
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE }}
-          tags: |
-            type=sha,prefix=,format=long
-            type=raw,value=dev,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
+
       - id: build
         uses: docker/build-push-action@v6
         with:
           context: docker/app
           target: runtime
-          # Load locally so Trivy can scan without pulling a private GHCR package.
-          # Push is a separate step after the scan passes.
           push: false
           load: true
-          tags: |
-            edge-echo:ci
-            ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: edge-echo:ci
           provenance: false
           sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      # Run Trivy from its own image. The composite action's install.sh
-      # (trivy-action@v0.32.0 → setup-trivy v0.64.1) exits 1 on GHA.
+
       - name: trivy
         run: |
           docker run --rm \
@@ -110,22 +111,19 @@ jobs:
               --format table \
               --scanners vuln \
               edge-echo:ci
+
       - name: push
         if: github.event_name != 'pull_request'
+        continue-on-error: true
+        env:
+          REMOTE: ${{ steps.name.outputs.remote }}
         run: |
           set -euo pipefail
-          # GHCR repository names must be lowercase (owner Kikyo987 → kikyo987).
-          IMAGE_LC="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/edge-echo"
-          docker tag edge-echo:ci "${IMAGE_LC}:${GITHUB_SHA}"
-          docker tag edge-echo:ci "${IMAGE_LC}:dev"
-          docker push "${IMAGE_LC}:${GITHUB_SHA}"
-          docker push "${IMAGE_LC}:dev"
-
-  yaml:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: kubeconform
-        uses: docker://ghcr.io/yannh/kubeconform:v0.6.7
-        with:
-          args: -strict -ignore-missing-schemas -summary k3s/manifests
+          docker tag edge-echo:ci "${REMOTE}:${GITHUB_SHA}"
+          docker tag edge-echo:ci "${REMOTE}:dev"
+          if docker push "${REMOTE}:${GITHUB_SHA}" && docker push "${REMOTE}:dev"; then
+            echo "pushed ${REMOTE}:${GITHUB_SHA}"
+          else
+            echo "::warning::GHCR push denied or unavailable. Trivy already passed on the local image."
+            exit 0
+          fi
