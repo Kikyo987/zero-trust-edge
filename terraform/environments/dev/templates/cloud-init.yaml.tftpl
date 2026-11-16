@@ -1,0 +1,207 @@
+#cloud-config
+# cloud-init for the zero-trust edge node.
+# Secrets are NOT in this file. Optional Tailscale / tunnel tokens
+# are read from SSM at /${project}/* if present.
+#
+# Docker and k3s both run here. They do NOT share a containerd:
+#   Docker  → /var/lib/docker
+#   k3s     → /var/lib/rancher/k3s/agent/containerd
+# Do not pass --docker to k3s. containerd is the k3s runtime.
+
+package_update: true
+package_upgrade: false
+packages:
+  - ca-certificates
+  - curl
+  - jq
+  - iptables
+  - ethtool
+  - traceroute
+  - iputils-ping
+  - unzip
+  - git
+  - ufw
+  - awscli
+
+write_files:
+  - path: /etc/sysctl.d/99-edge.conf
+    permissions: "0644"
+    content: |
+      net.ipv4.conf.all.rp_filter = 1
+      net.ipv4.conf.default.rp_filter = 1
+      net.ipv4.tcp_congestion_control = bbr
+      net.core.default_qdisc = fq
+      net.ipv4.ip_forward = 1
+      net.ipv4.conf.all.send_redirects = 0
+      net.ipv4.conf.all.accept_redirects = 0
+      net.ipv4.conf.all.accept_source_route = 0
+      net.ipv6.conf.all.accept_ra = 0
+      net.ipv4.tcp_mtu_probing = 1
+
+  - path: /opt/edge/bootstrap.sh
+    permissions: "0750"
+    content: |
+      #!/usr/bin/env bash
+      # Idempotent first-boot: Docker + k3s + Traefik ClusterIP + sample app.
+      set -euo pipefail
+      exec > >(tee -a /var/log/edge-bootstrap.log) 2>&1
+      echo "bootstrap start $$(date -u +%FT%TZ)"
+
+      K3S_VERSION="${k3s_version}"
+      CLUSTER_CIDR="${cluster_cidr}"
+      SERVICE_CIDR="${service_cidr}"
+      APP_IMAGE="${app_image}"
+      APP_HOST="${app_hostname}"
+      MANIFESTS_REPO="${manifests_repo}"
+      PROJECT="${project}"
+
+      # ----- identity from IMDSv2 (required on this instance) -----
+      IMDS="http://169.254.169.254/latest"
+      TOKEN="$$(curl -fsS -X PUT "$$IMDS/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")"
+      HDR=("X-aws-ec2-metadata-token: $$TOKEN")
+      PRIVATE_IP="$$(curl -fsS -H "$${HDR[@]}" "$$IMDS/meta-data/local-ipv4")"
+      DEFAULT_IF="$$(ip -o -4 route show to default | awk '{print $$5}' | head -1)"
+      ip link set dev "$$DEFAULT_IF" mtu 1500 || true
+      sysctl --system || true
+
+      # ----- host firewall: deny inbound, allow outbound, Tailscale later -----
+      ufw --force reset
+      ufw default deny incoming
+      ufw default allow outgoing
+      ufw allow in on tailscale0 || true
+      ufw --force enable
+
+      # ----- Docker (compose / image builds). Not the k3s runtime. -----
+      if ! command -v docker >/dev/null; then
+        curl -fsSL https://get.docker.com | sh
+        usermod -aG docker ubuntu || true
+        systemctl enable --now docker
+      fi
+      docker version >/dev/null
+
+      # ----- k3s: advertise the VPC private IP. Tailscale SAN added if present. -----
+      TLS_SAN_ARGS=(--tls-san="$$PRIVATE_IP" --tls-san=127.0.0.1)
+      TS_IP="$$(ip -4 addr show tailscale0 2>/dev/null | awk '/inet / {print $$2}' | cut -d/ -f1 || true)"
+      if [[ -n "$$TS_IP" ]]; then
+        TLS_SAN_ARGS+=(--tls-san="$$TS_IP")
+        ADVERTISE="$$TS_IP"
+      else
+        ADVERTISE="$$PRIVATE_IP"
+      fi
+
+      FLANNEL_BACKEND="vxlan"
+      if [[ -d /sys/module/wireguard ]] || modprobe wireguard 2>/dev/null; then
+        FLANNEL_BACKEND="wireguard-native"
+      fi
+
+      if ! command -v k3s >/dev/null; then
+        export INSTALL_K3S_VERSION="$$K3S_VERSION"
+        curl -fsSL https://get.k3s.io | sh -s - server \
+          --cluster-cidr="$$CLUSTER_CIDR" \
+          --service-cidr="$$SERVICE_CIDR" \
+          --flannel-backend="$$FLANNEL_BACKEND" \
+          --advertise-address="$$ADVERTISE" \
+          --node-ip="$$PRIVATE_IP" \
+          --disable=servicelb \
+          --disable=local-storage \
+          --write-kubeconfig-mode=600 \
+          --protect-kernel-defaults=true \
+          --secrets-encryption \
+          "$${TLS_SAN_ARGS[@]}"
+      fi
+
+      export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+      for i in $$(seq 1 60); do
+        kubectl get nodes >/dev/null 2>&1 && break
+        sleep 2
+      done
+
+      # ----- manifests: clone the reference repo, fall back to a local stub -----
+      mkdir -p /opt/edge
+      if [[ ! -d /opt/edge/repo/.git ]]; then
+        git clone --depth 1 "$$MANIFESTS_REPO" /opt/edge/repo || true
+      fi
+      if [[ -d /opt/edge/repo/k3s/manifests ]]; then
+        # Pin the image this environment asked for.
+        sed -i "s|image: ghcr.io/.*/edge-echo:.*|image: $$APP_IMAGE|" /opt/edge/repo/k3s/manifests/*deployment*.yaml 2>/dev/null || true
+        sed -i "s|host: app.example.com|host: $$APP_HOST|" /opt/edge/repo/k3s/manifests/*ingress*.yaml 2>/dev/null || true
+        kubectl apply -f /opt/edge/repo/k3s/manifests/
+      else
+        kubectl apply -f - <<YAML
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: edge
+      ---
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: edge-echo
+        namespace: edge
+      spec:
+        replicas: 2
+        selector:
+          matchLabels:
+            app: edge-echo
+        template:
+          metadata:
+            labels:
+              app: edge-echo
+          spec:
+            containers:
+              - name: edge-echo
+                image: $$APP_IMAGE
+                ports:
+                  - containerPort: 8080
+      ---
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: edge-echo
+        namespace: edge
+      spec:
+        selector:
+          app: edge-echo
+        ports:
+          - port: 8080
+            targetPort: 8080
+        type: ClusterIP
+      ---
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: edge-echo
+        namespace: edge
+      spec:
+        ingressClassName: traefik
+        rules:
+          - host: $$APP_HOST
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: edge-echo
+                      port:
+                        number: 8080
+      YAML
+      fi
+
+      # Optional: Tailscale join key from SSM. Never logged.
+      if command -v aws >/dev/null; then
+        TS_KEY="$$(aws ssm get-parameter --name "/$$PROJECT/tailscale-auth-key" --with-decryption --query Parameter.Value --output text 2>/dev/null || true)"
+        if [[ -n "$$TS_KEY" && "$$TS_KEY" != "None" ]]; then
+          if ! command -v tailscale >/dev/null; then
+            curl -fsSL https://tailscale.com/install.sh | sh
+          fi
+          tailscale up --ssh --advertise-tags=tag:node --auth-key="$$TS_KEY" || true
+        fi
+      fi
+
+      echo "bootstrap done $$(date -u +%FT%TZ) advertise=$$ADVERTISE flannel=$$FLANNEL_BACKEND"
+
+runcmd:
+  - [/opt/edge/bootstrap.sh]
+
+final_message: "zero-trust-edge cloud-init finished. k3s + docker should be up. SSH remains closed on the public IP."

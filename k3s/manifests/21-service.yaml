@@ -1,0 +1,21 @@
+# ClusterIP only. A NodePort or LoadBalancer would punch a hole through
+# the host and fight the empty security group. Users reach this Service
+# via Cloudflare Tunnel → Traefik Ingress, or via cloudflared talking
+# to edge-echo.edge.svc.cluster.local:8080 directly.
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge-echo
+  namespace: edge
+  labels:
+    app: edge-echo
+spec:
+  type: ClusterIP
+  selector:
+    app: edge-echo
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  sessionAffinity: None

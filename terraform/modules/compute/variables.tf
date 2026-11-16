@@ -11,6 +11,11 @@ variable "security_group_id" {
   type = string
 }
 
+variable "instance_profile_name" {
+  type        = string
+  description = "From the iam module. Do not create a second profile here."
+}
+
 variable "instance_type" {
   type        = string
   default     = "t4g.small"
@@ -31,12 +36,12 @@ variable "ami_name_filter" {
 variable "assign_public_ip" {
   type        = bool
   default     = true
-  description = "Cheap egress path. Combined with an empty SG this is still zero inbound."
+  description = "Cheap egress path. Combined with deny-all inbound SG this is still zero inbound."
 }
 
 variable "root_volume_gb" {
   type    = number
-  default = 20
+  default = 40 # Docker + k3s + Loki need more than 20 GB in practice
 }
 
 variable "key_name" {
@@ -47,13 +52,12 @@ variable "key_name" {
 
 variable "user_data" {
   type        = string
-  default     = ""
-  description = "cloud-init. Keep secrets out of here — pull from SSM/Secrets Manager."
+  description = "cloud-init. Keep secrets out of here — pull from SSM."
 }
 
 variable "detailed_monitoring" {
   type    = bool
-  default = false # 1-minute CloudWatch is a paid extra; 5-minute is enough
+  default = false
 }
 
 variable "enable_snapshots" {

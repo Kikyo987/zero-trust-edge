@@ -1,27 +1,11 @@
-# edge-echo: the sample workload. Non-root, read-only rootfs, dropped
-# caps, resource limits, probes on /healthz and /readyz. Image is
-# replaced by CI with a digest pin.
+# Sample workload. Production constraints are the point of this file:
+# non-root, read-only rootfs, dropped caps, requests+limits, probes.
+# CI replaces the image tag with a digest pin.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: edge-echo
   namespace: edge
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: edge-echo
-  namespace: edge
-  labels:
-    app: edge-echo
-spec:
-  selector:
-    app: edge-echo
-  ports:
-    - name: http
-      port: 8080
-      targetPort: http
-  type: ClusterIP # never NodePort, never LoadBalancer
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -55,7 +39,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: edge-echo
-          image: ghcr.io/example/edge-echo:1.0.0
+          image: ghcr.io/kikyo987/edge-echo:dev
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -63,8 +47,6 @@ spec:
           env:
             - name: LISTEN_ADDR
               value: ":8080"
-            - name: GIN_MODE
-              value: release
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

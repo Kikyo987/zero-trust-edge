@@ -1,17 +1,40 @@
 # Copy to terraform.tfvars (gitignored) and fill in.
+#   cp terraform.tfvars.example terraform.tfvars
 
-project          = "edge-zero"
-region           = "us-east-1"
-vpc_cidr         = "10.42.0.0/16"
+# ----- identity -----
+project = "edge-zero"
+region  = "us-east-1"
 
-# Cheap default: public IP, empty SG, no NAT Gateway.
-enable_nat_gateway   = false
-assign_public_ip     = true
-egress_unrestricted  = false
+# ----- CIDR plan (keep these disjoint) -----
+# VPC          10.42.0.0/16    AWS
+#   public a   10.42.0.0/24    IGW, egress only
+#   public b   10.42.1.0/24
+#   private a  10.42.10.0/24   k3s node when assign_public_ip=false
+#   private b  10.42.11.0/24   future HA
+# pods         10.43.0.0/16    k3s only
+# services     10.44.0.0/16    ClusterIP, never routed to the VPC
+# Tailscale    100.64.0.0/10   overlay — never a VPC CIDR
+vpc_cidr     = "10.42.0.0/16"
+cluster_cidr = "10.43.0.0/16"
+service_cidr = "10.44.0.0/16"
 
-instance_type    = "t4g.small"
-architecture     = "arm64"
-root_volume_gb   = 20
+# ----- egress / NAT -----
+# Cheap default: public IPv4 + deny-all inbound SG, no NAT Gateway.
+# Strict: assign_public_ip=false AND enable_nat_gateway=true.
+enable_nat_gateway  = false
+assign_public_ip    = true
+egress_unrestricted = false
 
-# Globally unique. Include account id.
+# ----- node -----
+instance_type  = "t4g.small" # arm64. Use t3.small + architecture=x86_64 if you must.
+architecture   = "arm64"
+root_volume_gb = 40
+
+# ----- k3s / app (cloud-init) -----
+k3s_version    = "v1.31.4+k3s1"
+app_image      = "ghcr.io/kikyo987/edge-echo:dev"
+app_hostname   = "app.example.com"
+manifests_repo = "https://github.com/Kikyo987/zero-trust-edge.git"
+
+# ----- flow logs (globally unique — include account id) -----
 flow_logs_bucket = "edge-zero-dev-flow-logs-123456789012"

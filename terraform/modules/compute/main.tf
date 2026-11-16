@@ -1,10 +1,12 @@
 # Single k3s node. ARM by default (t4g.small). Encrypted gp3, IMDSv2
-# required, no SSH key injected unless you pass one (Tailscale is the
-# login path).
+# required. IAM profile comes from the iam module — this module does
+# not mint its own role.
 #
-# assign_public_ip = true is the cheap path: IGW SNAT, empty SG, no NAT
-# Gateway. Set it false and enable_nat_gateway on the VPC module if a
-# policy forbids public addresses on compute.
+# assign_public_ip = true is the cheap path: IGW SNAT, empty public
+# inbound SG, no NAT Gateway. Set it false and enable_nat_gateway on
+# the VPC module if a policy forbids public addresses on compute.
+#
+# cloud-init (user_data) installs Docker + k3s. Secrets stay in SSM.
 
 terraform {
   required_version = ">= 1.6.0"
@@ -41,39 +43,6 @@ data "aws_ami" "ubuntu" {
   }
 }
 
-resource "aws_iam_role" "node" {
-  name = "${var.name}-node"
-  tags = var.tags
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Principal = {
-        Service = "ec2.amazonaws.com"
-      }
-      Action = "sts:AssumeRole"
-    }]
-  })
-}
-
-# SSM in case Tailscale is down during bootstrap. Still no inbound port:
-# SSM uses outbound HTTPS to the endpoint / public SSM API.
-resource "aws_iam_role_policy_attachment" "ssm" {
-  role       = aws_iam_role.node.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-}
-
-resource "aws_iam_role_policy_attachment" "ecr_read" {
-  role       = aws_iam_role.node.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-}
-
-resource "aws_iam_instance_profile" "node" {
-  name = "${var.name}-node"
-  role = aws_iam_role.node.name
-  tags = var.tags
-}
-
 resource "aws_eip" "node" {
   count  = var.assign_public_ip ? 1 : 0
   domain = "vpc"
@@ -85,7 +54,7 @@ resource "aws_instance" "node" {
   instance_type          = var.instance_type
   subnet_id              = var.subnet_id
   vpc_security_group_ids = [var.security_group_id]
-  iam_instance_profile   = aws_iam_instance_profile.node.name
+  iam_instance_profile   = var.instance_profile_name
   key_name               = var.key_name == "" ? null : var.key_name
 
   associate_public_ip_address = var.assign_public_ip
@@ -107,14 +76,9 @@ resource "aws_instance" "node" {
     instance_metadata_tags      = "enabled"
   }
 
-  enclave_options {
-    enabled = false
-  }
-
   monitoring = var.detailed_monitoring
 
-  user_data = var.user_data
-
+  user_data                   = var.user_data
   user_data_replace_on_change = false
 
   tags = merge(var.tags, {
@@ -123,7 +87,7 @@ resource "aws_instance" "node" {
   })
 
   lifecycle {
-    ignore_changes = [ami] # patch in-place; do not rebuild the control plane on Canonical's latest
+    ignore_changes = [ami]
   }
 }
 
@@ -133,7 +97,27 @@ resource "aws_eip_association" "node" {
   allocation_id = aws_eip.node[0].id
 }
 
-# Daily snapshots of the root volume — cheap RPO for sqlite/k3s.
+# Daily snapshots of the root volume — cheap RPO for k3s sqlite.
+resource "aws_iam_role" "dlm" {
+  count = var.enable_snapshots ? 1 : 0
+  name  = "${var.name}-dlm"
+  tags  = var.tags
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "dlm.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "dlm" {
+  count      = var.enable_snapshots ? 1 : 0
+  role       = aws_iam_role.dlm[0].name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole"
+}
+
 resource "aws_dlm_lifecycle_policy" "node" {
   count              = var.enable_snapshots ? 1 : 0
   description        = "${var.name} k3s root snapshots"
@@ -159,24 +143,4 @@ resource "aws_dlm_lifecycle_policy" "node" {
       copy_tags = true
     }
   }
-}
-
-resource "aws_iam_role" "dlm" {
-  count = var.enable_snapshots ? 1 : 0
-  name  = "${var.name}-dlm"
-  tags  = var.tags
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Service = "dlm.amazonaws.com" }
-      Action    = "sts:AssumeRole"
-    }]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "dlm" {
-  count      = var.enable_snapshots ? 1 : 0
-  role       = aws_iam_role.dlm[0].name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole"
 }
