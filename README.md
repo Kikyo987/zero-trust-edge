@@ -220,9 +220,11 @@ sudo ./scripts/zero-trust-verify.sh
 | Doc | Contents |
 | --- | --- |
 | [Architecture](docs/architecture.md) | Data flow, security boundaries, why this design |
+| [ADR 0001](docs/adr/0001-zero-trust-edge.md) | Why Tunnel + Tailscale, not a VPN or public LB |
 | [FinOps](docs/finops.md) | Monthly model, NAT Gateway avoidance |
 | [Postmortem example](docs/postmortem-example.md) | Tunnel MTU black hole |
 | [Cloudflare tunnel + Access](cloudflare/tunnel-and-access.md) | Zero-inbound tunnel, GitHub/Google MFA, Tailscale ACL vs VPN |
+| [CONTRIBUTING](CONTRIBUTING.md) | Local run, commits |
 | [SECURITY](SECURITY.md) | Reporting and baseline |
 
 MIT license.
