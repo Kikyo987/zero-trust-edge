@@ -227,7 +227,7 @@ sudo ./scripts/zero-trust-verify.sh
 | [Architecture](docs/architecture.md) | Data flow, security boundaries, why this design |
 | [FinOps](docs/finops.md) | Monthly model, NAT Gateway avoidance |
 | [Postmortem example](docs/postmortem-example.md) | Tunnel MTU black hole |
-| [Cloudflare tunnel + Access](cloudflare/tunnel-and-access.md) | Named tunnel, policies, rotation |
+| [Cloudflare tunnel + Access](cloudflare/tunnel-and-access.md) | Zero-inbound tunnel, GitHub/Google MFA, Tailscale ACL vs VPN |
 | [SECURITY](SECURITY.md) | Reporting and baseline |
 
 MIT license.
