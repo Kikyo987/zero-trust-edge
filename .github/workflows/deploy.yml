@@ -157,9 +157,13 @@ jobs:
         env:
           REMOTE: ${{ steps.meta.outputs.remote }}
           SHA: ${{ needs.preflight.outputs.sha }}
-          TARGET_ENV: ${{ github.event.inputs.environment }}
+          TARGET_ENV: ${{ github.event_name == 'push' && 'staging' || github.event.inputs.environment }}
         run: |
           set -euo pipefail
+          if [[ -z "${TARGET_ENV}" ]]; then
+            echo "TARGET_ENV is empty; refusing to push an untagged image" >&2
+            exit 1
+          fi
           ref="${REMOTE}:${SHA}"
           docker tag edge-echo:ci "${ref}"
           docker tag edge-echo:ci "${REMOTE}:${TARGET_ENV}"
